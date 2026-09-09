@@ -47,6 +47,18 @@ func OpenStore(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+func (s *Store) nodeForCheck(ctx context.Context, id string) (Node, bool, error) {
+	var node Node
+	var raw string
+	var applied bool
+	err := s.db.QueryRowContext(ctx, `SELECT n.id,n.enabled,n.available,n.config,
+		s.revision=s.applied_revision AND s.last_error=''
+		FROM nodes n CROSS JOIN state s WHERE n.id=? AND s.id=1`, id).
+		Scan(&node.ID, &node.Enabled, &node.Available, &raw, &applied)
+	node.Config = json.RawMessage(raw)
+	return node, applied, err
+}
+
 func newID() string {
 	var b [12]byte
 	if _, err := rand.Read(b[:]); err != nil {

@@ -22,11 +22,14 @@ type Server struct {
 	AdminKey string
 	mu       sync.Mutex
 	sessions map[string]time.Time
+	Checks   *NodeChecks
 }
 
 func NewServer(m *Manager, key string) *Server {
-	return &Server{Manager: m, AdminKey: key, sessions: map[string]time.Time{}}
+	return &Server{Manager: m, AdminKey: key, sessions: map[string]time.Time{}, Checks: NewNodeChecks(m)}
 }
+
+func (s *Server) Close() { s.Checks.Close() }
 
 func respond(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -109,6 +112,9 @@ func (s *Server) Handler(assets http.Handler) http.Handler {
 		s.change(w, r, func() error { return s.Manager.Store.DeleteNode(r.Context(), r.PathValue("id")) })
 	})
 	mux.HandleFunc("POST /api/nodes/{id}/check", s.checkNode)
+	mux.HandleFunc("GET /api/node-checks", s.nodeChecksState)
+	mux.HandleFunc("POST /api/node-checks/batch", s.startNodeCheckBatch)
+	mux.HandleFunc("POST /api/node-checks/batch/{id}/stop", s.stopNodeCheckBatch)
 	mux.HandleFunc("POST /api/import", s.importNodes)
 	mux.HandleFunc("POST /api/subscriptions", s.saveSubscription)
 	mux.HandleFunc("PUT /api/subscriptions/{id}", s.saveSubscription)
@@ -182,9 +188,10 @@ func (s *Server) state(w http.ResponseWriter, r *http.Request) {
 	version, coreErr := s.Manager.Kernel.Version(ctx)
 	respond(w, 200, struct {
 		State
-		CoreReady   bool   `json:"coreReady"`
-		CoreVersion string `json:"coreVersion"`
-	}{state, coreErr == nil, version})
+		CoreReady   bool              `json:"coreReady"`
+		CoreVersion string            `json:"coreVersion"`
+		Checks      NodeCheckSnapshot `json:"checks"`
+	}{state, coreErr == nil, version, s.Checks.Snapshot(state)})
 }
 func (s *Server) change(w http.ResponseWriter, r *http.Request, fn func() error) {
 	result, err := s.Manager.Change(r.Context(), fn)
@@ -307,25 +314,42 @@ func (s *Server) syncSubscription(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) checkNode(w http.ResponseWriter, r *http.Request) {
+	if err := s.Checks.StartSingle(r.Context(), r.PathValue("id")); err != nil {
+		problem(w, 400, err)
+		return
+	}
+	s.writeNodeChecks(w, r, http.StatusAccepted)
+}
+
+func (s *Server) writeNodeChecks(w http.ResponseWriter, r *http.Request, status int) {
 	state, err := s.Manager.Snapshot(r.Context())
 	if err != nil {
 		problem(w, 500, err)
 		return
 	}
-	for _, n := range state.Nodes {
-		if n.ID == r.PathValue("id") {
-			if !n.Enabled || !n.Available {
-				problem(w, 400, errors.New("节点未启用或已失效"))
-				return
-			}
-			delay, err := s.Manager.Kernel.Delay(r.Context(), n.ID)
-			if err != nil {
-				problem(w, 502, err)
-				return
-			}
-			respond(w, 200, map[string]int{"delay": delay})
-			return
-		}
+	respond(w, status, s.Checks.Snapshot(state))
+}
+func (s *Server) nodeChecksState(w http.ResponseWriter, r *http.Request) {
+	s.writeNodeChecks(w, r, http.StatusOK)
+}
+func (s *Server) startNodeCheckBatch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs []string `json:"ids"`
 	}
-	problem(w, 404, errors.New("节点不存在"))
+	if err := readJSON(w, r, &req); err != nil {
+		problem(w, 400, err)
+		return
+	}
+	if err := s.Checks.StartBatch(r.Context(), req.IDs); err != nil {
+		problem(w, 400, err)
+		return
+	}
+	s.writeNodeChecks(w, r, http.StatusAccepted)
+}
+func (s *Server) stopNodeCheckBatch(w http.ResponseWriter, r *http.Request) {
+	if err := s.Checks.StopBatch(r.PathValue("id")); err != nil {
+		problem(w, 404, err)
+		return
+	}
+	s.writeNodeChecks(w, r, http.StatusOK)
 }

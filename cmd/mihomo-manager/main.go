@@ -118,7 +118,9 @@ func run() error {
 			}
 		}
 	}()
-	server := &http.Server{Addr: addr, Handler: manager.NewServer(m, key).Handler(web.Handler()), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+	control := manager.NewServer(m, key)
+	defer control.Close()
+	server := &http.Server{Addr: addr, Handler: control.Handler(web.Handler()), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	done := make(chan error, 1)
 	go func() { log.Printf("Mihomo Manager listening on %s", addr); done <- server.ListenAndServe() }()
 	select {
