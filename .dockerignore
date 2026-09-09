@@ -1,0 +1,11 @@
+.git
+.cache
+bin
+data
+.test-data
+generated
+.env
+.env.local
+*.log
+*.tmp
+*.zip

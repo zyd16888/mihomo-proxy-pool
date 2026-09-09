@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light"><title>Mihomo Manager</title>
+  <link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+</head>
+<body>
+  <section id="login" class="login-shell" hidden>
+    <form id="login-form" class="login-card">
+      <span class="wordmark">M / M</span><p class="eyebrow">MIHOMO MANAGER</p>
+      <h1>每条线路，清晰可控。</h1><p class="muted">登录后管理节点与固定监听端口。</p>
+      <label for="admin-key">管理口令</label><input id="admin-key" type="password" autocomplete="current-password" required>
+      <p id="login-error" role="alert" class="error-text"></p><button class="primary" type="submit">进入管理台 <span aria-hidden="true">↗</span></button>
+    </form>
+  </section>
+  <div id="workspace" class="workspace" hidden>
+    <aside class="sidebar">
+      <a href="#listeners" class="brand"><span class="wordmark">M / M</span><span>Mihomo<br><strong>Manager</strong></span></a>
+      <p class="nav-caption">工作空间</p>
+      <nav aria-label="主要导航">
+        <a href="#listeners" data-page="listeners"><span>01</span>监听管理 <b id="nav-listeners">0</b></a>
+        <a href="#nodes" data-page="nodes"><span>02</span>节点池 <b id="nav-nodes">0</b></a>
+        <a href="#subscriptions" data-page="subscriptions"><span>03</span>订阅管理 <b id="nav-subscriptions">0</b></a>
+      </nav>
+      <div class="sidebar-bottom"><span class="live-dot" id="core-dot"></span><span id="core-label">正在连接内核</span></div>
+    </aside>
+    <main>
+      <header class="topbar"><span>代理服务 / <span id="breadcrumb">监听管理</span></span><div class="topbar-actions"><button id="refresh" class="quiet">刷新状态</button><button id="logout" class="quiet">退出</button></div></header>
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+      <section class="page-heading"><div><p class="eyebrow" id="page-kicker">LISTENERS</p><h1 id="page-title">监听管理</h1><p class="muted" id="page-description">为固定端口绑定一条节点线路，保存后自动应用。</p></div><button id="create" class="primary">＋ 新增监听</button></section>
+      <section class="application-bar" aria-label="配置应用状态"><div><span id="apply-dot" class="status-dot"></span><strong id="apply-title">读取配置中</strong><span id="apply-detail" class="muted"></span></div><button id="apply" class="quiet">重新应用</button></section>
+      <p id="apply-error" class="apply-error" role="alert" hidden></p>
+      <section class="data-panel"><div class="table-toolbar"><strong id="table-title">固定监听</strong><label class="search-label"><span class="sr-only">搜索当前列表</span><input type="search" id="search" placeholder="搜索名称、端口或节点…"></label></div><div class="table-scroll" id="table"></div><footer class="table-footer"><span id="row-count">0 条记录</span><span id="table-note">HTTP / SOCKS5 · mixed</span></footer></section>
+      <p class="page-footnote" id="page-footnote">删除监听不会删除节点。更换绑定会影响该端口的新连接。</p>
+    </main>
+  </div>
+  <dialog id="listener-dialog" aria-labelledby="listener-title"><form id="listener-form">
+    <div class="dialog-heading"><div><p class="eyebrow">FIXED LISTENER</p><h2 id="listener-title">新增监听</h2></div><button type="button" data-close class="close" aria-label="关闭">×</button></div>
+    <input type="hidden" id="listener-id">
+    <label for="listener-name">监听名称</label><input id="listener-name" required maxlength="120" placeholder="例如：采集线路 A">
+    <label for="listener-port">本地监听端口</label><input id="listener-port" type="number" required min="1" max="65535" step="1"><p class="field-hint">1–65535，端口须未被其他服务占用。支持 HTTP 和 SOCKS5。</p>
+    <label for="listener-node">绑定节点</label><select id="listener-node" required></select>
+    <label class="checkbox"><input id="listener-enabled" type="checkbox" checked>启用此监听</label>
+    <p class="dialog-error error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close class="quiet">取消</button><button type="submit" class="primary">保存并应用</button></div>
+  </form></dialog>
+  <dialog id="import-dialog" aria-labelledby="import-title"><form id="import-form">
+    <div class="dialog-heading"><div><p class="eyebrow">NODE IMPORT</p><h2 id="import-title">导入节点</h2></div><button type="button" data-close class="close" aria-label="关闭">×</button></div>
+    <p class="muted">支持 Clash YAML、JSON 节点数组、URI 或 Base64 订阅内容。导入不会自动开放监听端口。</p>
+    <label for="import-raw">节点配置</label><textarea id="import-raw" rows="12" required spellcheck="false" placeholder="粘贴节点链接或完整配置…"></textarea>
+    <p class="field-hint">手动节点按名称更新；重复导入同一节点保留已有监听绑定。</p>
+    <p class="dialog-error error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close class="quiet">取消</button><button type="submit" class="primary">导入节点</button></div>
+  </form></dialog>
+  <dialog id="subscription-dialog" aria-labelledby="subscription-title"><form id="subscription-form">
+    <div class="dialog-heading"><div><p class="eyebrow">SUBSCRIPTION</p><h2 id="subscription-title">添加订阅</h2></div><button type="button" data-close class="close" aria-label="关闭">×</button></div>
+    <input type="hidden" id="subscription-id"><label for="subscription-name">订阅名称</label><input id="subscription-name" required maxlength="120" placeholder="例如：我的订阅">
+    <label for="subscription-url">订阅地址</label><input id="subscription-url" type="url" required placeholder="https://…" autocomplete="off"><p class="field-hint">保存后点击“同步节点”获取订阅。同步不重新分配监听端口。</p>
+    <p class="dialog-error error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close class="quiet">取消</button><button type="submit" class="primary">保存订阅</button></div>
+  </form></dialog>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title"><form id="confirm-form"><p class="eyebrow">CONFIRM</p><h2 id="confirm-title">确认删除</h2><p id="confirm-description"></p><p class="dialog-error error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close class="quiet">取消</button><button type="submit" class="danger">确认删除</button></div></form></dialog>
+</body></html>

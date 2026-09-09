@@ -1,0 +1,22 @@
+services:
+  mihomo-manager:
+    build:
+      context: .
+      args:
+        MIHOMO_VERSION: v1.19.30
+    image: mihomo-manager:local
+    network_mode: host
+    restart: unless-stopped
+    stop_grace_period: 75s
+    environment:
+      ADMIN_KEY: ${ADMIN_KEY:?请在 .env 中设置至少 12 字符的 ADMIN_KEY}
+      TZ: ${TZ:-Asia/Shanghai}
+      CONTROL_ADDR: 0.0.0.0:3481
+      MIHOMO_CONTROL_ADDR: 127.0.0.1:9090
+    volumes:
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
