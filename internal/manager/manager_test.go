@@ -21,7 +21,11 @@ func storeForTest(t *testing.T) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("close test database: %v", err)
+		}
+	})
 	return s
 }
 func parsed(t *testing.T, raw string) []importer.Proxy {

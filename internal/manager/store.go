@@ -32,6 +32,7 @@ func OpenStore(path string) (*Store, error) {
 	for _, stmt := range []string{
 		`PRAGMA foreign_keys=ON`, `PRAGMA journal_mode=WAL`, `PRAGMA busy_timeout=5000`,
 		`CREATE TABLE IF NOT EXISTS subscriptions(id TEXT PRIMARY KEY,name TEXT NOT NULL,url TEXT NOT NULL UNIQUE,updated_at TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE IF NOT EXISTS subscription_usage(subscription_id TEXT PRIMARY KEY REFERENCES subscriptions(id) ON DELETE CASCADE,upload_bytes INTEGER,download_bytes INTEGER,total_bytes INTEGER,expire INTEGER,updated_at TEXT NOT NULL DEFAULT '',checked_at TEXT NOT NULL,status TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS nodes(id TEXT PRIMARY KEY,name TEXT NOT NULL,source_id TEXT NOT NULL,identity TEXT NOT NULL,protocol TEXT NOT NULL,server TEXT NOT NULL,port INTEGER NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,available INTEGER NOT NULL DEFAULT 1,config TEXT NOT NULL,UNIQUE(source_id,name))`,
 		`CREATE TABLE IF NOT EXISTS listeners(id TEXT PRIMARY KEY,name TEXT NOT NULL,port INTEGER NOT NULL UNIQUE CHECK(port BETWEEN 1 AND 65535),node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE RESTRICT,enabled INTEGER NOT NULL DEFAULT 1)`,
 		`CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL DEFAULT 0,applied_revision INTEGER NOT NULL DEFAULT -1,last_error TEXT NOT NULL DEFAULT '',applied_at TEXT NOT NULL DEFAULT '')`,
@@ -105,15 +106,23 @@ func (s *Store) Snapshot(ctx context.Context) (State, error) {
 	if err != nil {
 		return state, err
 	}
-	rows, err = s.db.QueryContext(ctx, `SELECT id,name,url,updated_at FROM subscriptions ORDER BY name`)
+	rows, err = s.db.QueryContext(ctx, `SELECT s.id,s.name,s.url,s.updated_at,u.subscription_id,
+		u.upload_bytes,u.download_bytes,u.total_bytes,u.expire,COALESCE(u.updated_at,''),COALESCE(u.checked_at,''),COALESCE(u.status,'')
+		FROM subscriptions s LEFT JOIN subscription_usage u ON u.subscription_id=s.id ORDER BY s.name`)
 	if err != nil {
 		return state, err
 	}
 	for rows.Next() {
 		var sub Subscription
-		if err = rows.Scan(&sub.ID, &sub.Name, &sub.URL, &sub.UpdatedAt); err != nil {
+		var usageID *string
+		var usage SubscriptionUsage
+		if err = rows.Scan(&sub.ID, &sub.Name, &sub.URL, &sub.UpdatedAt, &usageID, &usage.UploadBytes, &usage.DownloadBytes, &usage.TotalBytes, &usage.Expire, &usage.UpdatedAt, &usage.CheckedAt, &usage.Status); err != nil {
 			rows.Close()
 			return state, err
+		}
+		if usageID != nil {
+			usage.calculate()
+			sub.Usage = &usage
 		}
 		state.Subscriptions = append(state.Subscriptions, sub)
 	}
@@ -216,6 +225,9 @@ func (s *Store) SaveSubscription(ctx context.Context, sub Subscription) error {
 	return s.mutate(ctx, func(tx *sql.Tx) error {
 		if sub.ID == "" {
 			_, err := tx.ExecContext(ctx, `INSERT INTO subscriptions(id,name,url) VALUES(?,?,?)`, newID(), strings.TrimSpace(sub.Name), sub.URL)
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM subscription_usage WHERE subscription_id=? AND EXISTS(SELECT 1 FROM subscriptions WHERE id=? AND url<>?)`, sub.ID, sub.ID, sub.URL); err != nil {
 			return err
 		}
 		return changed(tx.ExecContext(ctx, `UPDATE subscriptions SET name=?,url=? WHERE id=?`, strings.TrimSpace(sub.Name), sub.URL, sub.ID))

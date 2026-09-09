@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -24,6 +25,28 @@ func freePort(t *testing.T) int {
 	port := l.Addr().(*net.TCPAddr).Port
 	l.Close()
 	return port
+}
+
+func TestVLESSShareConfigWithKernel(t *testing.T) {
+	binary := os.Getenv("MIHOMO_TEST_BIN")
+	if binary == "" {
+		t.Skip("set MIHOMO_TEST_BIN for native VLESS config validation")
+	}
+	binary, err := filepath.Abs(binary)
+	requireOK(t, err)
+	dir := t.TempDir()
+	store, err := OpenStore(filepath.Join(dir, "manager.db"))
+	requireOK(t, err)
+	defer store.Close()
+	key := base64.RawURLEncoding.EncodeToString([]byte("01234567890123456789012345678901"))
+	uri := "vless://00000000-0000-4000-8000-000000000001@example.invalid:443?security=reality&type=tcp&pbk=" + key + "&sid=0123456789abcdef&fp=chrome&sni=www.example.com&flow=xtls-rprx-vision&alpn=h2%2Chttp%2F1.1&packetEncoding=xudp#Reality"
+	requireOK(t, store.Import(background, "", parsed(t, uri)))
+	raw, _, err := BuildConfig(snapshot(t, store), "127.0.0.1:9090", "test-secret")
+	requireOK(t, err)
+	path := filepath.Join(dir, "candidate.yaml")
+	requireOK(t, os.WriteFile(path, raw, 0600))
+	kernel := NewRuntime(binary, dir, "http://127.0.0.1:9090", "test-secret")
+	requireOK(t, kernel.Validate(background, path))
 }
 func futureTime() time.Time { return time.Now().Add(time.Hour) }
 

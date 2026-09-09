@@ -368,10 +368,13 @@ func parseURIProxyConfig(line string) (map[string]any, error) {
 }
 
 func parseStandardURIProxyConfig(u *url.URL) (map[string]any, error) {
-	name, _ := url.QueryUnescape(u.Fragment)
+	name := u.Fragment // url.Parse has already decoded percent escapes; '+' is literal here.
 	host := u.Hostname()
 	portStr := u.Port()
-	query := u.Query()
+	query, queryErr := url.ParseQuery(u.RawQuery)
+	if queryErr != nil {
+		return nil, errors.New("节点链接参数编码无效，请重新复制完整链接")
+	}
 
 	proxy := map[string]any{
 		"name":   strings.TrimSpace(name),
@@ -462,6 +465,11 @@ func parseStandardURIProxyConfig(u *url.URL) (map[string]any, error) {
 	}
 	if u.Scheme != "http" {
 		proxy["udp"] = true
+	}
+	if u.Scheme == "vless" {
+		if err := applyVLESSOptions(proxy, query); err != nil {
+			return nil, err
+		}
 	}
 	return proxy, nil
 }

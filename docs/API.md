@@ -22,7 +22,8 @@
 | POST | `/api/node-checks/batch/{id}/stop` | 停止指定的当前批量任务 |
 | POST | `/api/subscriptions` | 新增 `{ "name": "来源", "url": "https://..." }` |
 | PUT | `/api/subscriptions/{id}` | 更新订阅名称与地址 |
-| POST | `/api/subscriptions/{id}/sync` | 下载并同步订阅 |
+| POST | `/api/subscriptions/{id}/sync` | 下载订阅并读取用量、同步节点 |
+| POST | `/api/subscriptions/{id}/usage` | 只刷新订阅用量，不重载配置 |
 | DELETE | `/api/subscriptions/{id}` | 删除订阅及其无引用节点 |
 
 监听写入示例：
@@ -65,3 +66,16 @@
 `ids` 必须为非空数组，重复 ID 自动合并，无效或停用节点不进入批量目标。已有批量任务运行时复用当前任务，不额外启动另一个批次；停止接口需传回当前 `batch.id`，避免旧页面停止了新任务。检测的身份认证、同源限制与其他管理接口一致。
 
 所有结果和任务均为进程内存状态，管理服务重启清空。
+
+
+## 订阅用量
+
+`GET /api/state` 的每个订阅可带 `usage` 对象。尚未获取用量时没有此对象；首次刷新未提供头时包含状态但没有数值。
+
+```json
+{"uploadBytes":100,"downloadBytes":300,"totalBytes":1000,"expire":2000000000,"usedBytes":400,"remainingBytes":600,"overageBytes":0,"status":"current","updatedAt":"2026-09-09T05:00:00Z","checkedAt":"2026-09-09T05:00:00Z"}
+```
+
+数值为字节，到期为 Unix 秒。缺失值为 `null`；用量任一计数缺失时 `usedBytes` 为 `null`，总量缺失/为 0 时 `remainingBytes` 为 `null`。状态为 `current/missing/invalid/fetch_failed`。`updatedAt` 是最后有效快照时间，`checkedAt` 是最近检查时间。
+
+`POST /api/subscriptions/{id}/usage` 成功返回 `{ "usage": ... }`，不返回 `saved/apply`。缺失或格式异常的响应头会更新状态并返回 200；网络/HTTP 错误返回错误状态，但保留历史有效快照。并发刷新同一订阅返回 409。用量更新不增加配置版本。

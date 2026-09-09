@@ -15,10 +15,11 @@ type Node struct {
 }
 
 type Subscription struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	URL       string `json:"url"`
-	UpdatedAt string `json:"updatedAt"`
+	ID        string             `json:"id"`
+	Name      string             `json:"name"`
+	URL       string             `json:"url"`
+	UpdatedAt string             `json:"updatedAt"`
+	Usage     *SubscriptionUsage `json:"usage,omitempty"`
 }
 
 type Listener struct {

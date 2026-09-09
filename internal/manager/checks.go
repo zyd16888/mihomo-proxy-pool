@@ -334,7 +334,14 @@ func (c *NodeChecks) execute(task *nodeCheckTask) {
 func (c *NodeChecks) currentNode(ctx context.Context, id string) (Node, bool, error) {
 	c.manager.mu.Lock()
 	defer c.manager.mu.Unlock()
-	return c.manager.Store.nodeForCheck(ctx, id)
+	if err := ctx.Err(); err != nil {
+		return Node{}, false, err
+	}
+	// sqlite v1.38.2 can lose the rows handle if cancellation arrives while a
+	// QueryContext result is being returned. Finish this short, indexed local
+	// read; execute checks cancellation immediately afterwards. Network probes
+	// remain cancellable, and SQLite's busy_timeout still bounds lock waits.
+	return c.manager.Store.nodeForCheck(context.WithoutCancel(ctx), id)
 }
 
 func (c *NodeChecks) Snapshot(state State) NodeCheckSnapshot {

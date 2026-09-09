@@ -23,10 +23,11 @@ type Server struct {
 	mu       sync.Mutex
 	sessions map[string]time.Time
 	Checks   *NodeChecks
+	syncing  map[string]bool
 }
 
 func NewServer(m *Manager, key string) *Server {
-	return &Server{Manager: m, AdminKey: key, sessions: map[string]time.Time{}, Checks: NewNodeChecks(m)}
+	return &Server{Manager: m, AdminKey: key, sessions: map[string]time.Time{}, Checks: NewNodeChecks(m), syncing: map[string]bool{}}
 }
 
 func (s *Server) Close() { s.Checks.Close() }
@@ -122,6 +123,7 @@ func (s *Server) Handler(assets http.Handler) http.Handler {
 		s.change(w, r, func() error { return s.Manager.Store.DeleteSubscription(r.Context(), r.PathValue("id")) })
 	})
 	mux.HandleFunc("POST /api/subscriptions/{id}/sync", s.syncSubscription)
+	mux.HandleFunc("POST /api/subscriptions/{id}/usage", s.refreshSubscriptionUsage)
 	mux.Handle("/", assets)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -253,6 +255,31 @@ func (s *Server) saveSubscription(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) syncSubscription(w http.ResponseWriter, r *http.Request) {
+	s.refreshSubscription(w, r, true)
+}
+func (s *Server) refreshSubscriptionUsage(w http.ResponseWriter, r *http.Request) {
+	s.refreshSubscription(w, r, false)
+}
+
+func (s *Server) recordUsage(ctx context.Context, sub Subscription, usage SubscriptionUsage, status string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	s.Manager.mu.Lock()
+	defer s.Manager.mu.Unlock()
+	return s.Manager.Store.RecordSubscriptionUsage(ctx, sub.ID, sub.URL, usage, status)
+}
+
+func (s *Server) refreshSubscription(w http.ResponseWriter, r *http.Request, importNodes bool) {
+	id := r.PathValue("id")
+	s.mu.Lock()
+	if s.syncing[id] {
+		s.mu.Unlock()
+		problem(w, http.StatusConflict, errors.New("该订阅正在刷新，请等待完成"))
+		return
+	}
+	s.syncing[id] = true
+	s.mu.Unlock()
+	defer func() { s.mu.Lock(); delete(s.syncing, id); s.mu.Unlock() }()
 	state, err := s.Manager.Snapshot(r.Context())
 	if err != nil {
 		problem(w, 500, err)
@@ -260,7 +287,7 @@ func (s *Server) syncSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	var sub Subscription
 	for _, item := range state.Subscriptions {
-		if item.ID == r.PathValue("id") {
+		if item.ID == id {
 			sub = item
 			break
 		}
@@ -269,11 +296,18 @@ func (s *Server) syncSubscription(w http.ResponseWriter, r *http.Request) {
 		problem(w, 404, errors.New("订阅不存在"))
 		return
 	}
+	fail := func(status int, message string) {
+		if err := s.recordUsage(r.Context(), sub, SubscriptionUsage{}, "fetch_failed"); err != nil {
+			problem(w, 500, err)
+			return
+		}
+		problem(w, status, errors.New(message))
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sub.URL, nil)
 	if err != nil {
-		problem(w, 400, errors.New("订阅地址无效"))
+		fail(400, "订阅地址无效")
 		return
 	}
 	req.Header.Set("User-Agent", "Clash.Meta/Mihomo-Manager")
@@ -281,17 +315,44 @@ func (s *Server) syncSubscription(w http.ResponseWriter, r *http.Request) {
 	defer client.CloseIdleConnections()
 	res, err := client.Do(req)
 	if err != nil {
-		problem(w, 502, errors.New("订阅下载失败，请检查地址和网络"))
+		fail(502, "订阅下载失败，请检查地址和网络")
 		return
 	}
 	defer res.Body.Close()
 	if res.StatusCode != 200 {
-		problem(w, 502, fmt.Errorf("订阅返回 HTTP %d", res.StatusCode))
+		fail(502, fmt.Sprintf("订阅返回 HTTP %d", res.StatusCode))
+		return
+	}
+	header := res.Header.Get("subscription-userinfo")
+	usage, parseErr := ParseSubscriptionUsage(header)
+	status := "current"
+	if strings.TrimSpace(header) == "" {
+		status = "missing"
+	} else if parseErr != nil {
+		status = "invalid"
+	}
+	if err = s.recordUsage(r.Context(), sub, usage, status); err != nil {
+		problem(w, 400, err)
+		return
+	}
+	if !importNodes {
+		current, err := s.Manager.Snapshot(r.Context())
+		if err != nil {
+			problem(w, 500, err)
+			return
+		}
+		for _, latest := range current.Subscriptions {
+			if latest.ID == sub.ID {
+				respond(w, 200, map[string]any{"usage": latest.Usage})
+				return
+			}
+		}
+		problem(w, 404, errors.New("订阅已移除"))
 		return
 	}
 	raw, err := io.ReadAll(io.LimitReader(res.Body, (10<<20)+1))
 	if err != nil || len(raw) > 10<<20 {
-		problem(w, 400, errors.New("订阅下载不完整或超过 10 MiB"))
+		problem(w, 400, errors.New("订阅内容下载不完整或超过 10 MiB，节点未更新"))
 		return
 	}
 	items, _, err := importer.Parse(importer.ImportRequest{Raw: string(raw)})
