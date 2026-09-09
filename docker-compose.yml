@@ -9,6 +9,8 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
       CONTROL_ADDR: 0.0.0.0:3481
       MIHOMO_CONTROL_ADDR: 127.0.0.1:9090
+      # 出口 IP 探测使用的回环端口。与宿主机已有服务冲突时改这里，0 关闭按节点探测。
+      EXIT_PROBE_PORT: ${EXIT_PROBE_PORT:-37891}
     volumes:
       - ./data:/data
     logging:

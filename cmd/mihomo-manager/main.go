@@ -71,7 +71,14 @@ func run() error {
 	defer store.Close()
 	// The image owns the kernel installation; native development resolves it via PATH.
 	kernel := manager.NewRuntime("mihomo", dir, "http://"+coreAddr, secret)
-	m := &manager.Manager{Store: store, Kernel: kernel, Dir: dir, CoreAddr: coreAddr, Secret: secret}
+	// The exit probe binds a loopback-only port. It is not a ReservedPorts
+	// entry: the kernel is the process that binds it, and ReservedPorts is the
+	// list the generated configuration must never contain.
+	probePort, err := strconv.Atoi(env("EXIT_PROBE_PORT", "37891"))
+	if err != nil || probePort < 0 || probePort > 65535 {
+		return errors.New("EXIT_PROBE_PORT 必须是 0–65535，0 表示关闭出口探测端口")
+	}
+	m := &manager.Manager{Store: store, Kernel: kernel, Dir: dir, CoreAddr: coreAddr, Secret: secret, ProbePort: probePort}
 	for _, a := range []string{addr, coreAddr} {
 		host, port, err := net.SplitHostPort(a)
 		if err != nil {

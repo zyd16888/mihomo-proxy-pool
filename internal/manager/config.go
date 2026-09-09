@@ -22,7 +22,18 @@ type Manager struct {
 	Kernel                Kernel
 	Dir, CoreAddr, Secret string
 	ReservedPorts         []int
-	mu                    sync.Mutex
+	// ProbePort is the loopback port used to measure exit addresses. Zero
+	// leaves the probe listener out of the generated configuration.
+	ProbePort int
+	mu        sync.Mutex
+}
+
+// snapshotLocked reads stored state and adds the settings that live in the
+// process rather than the database.
+func (m *Manager) snapshotLocked(ctx context.Context) (State, error) {
+	state, err := m.Store.Snapshot(ctx)
+	state.ProbePort = m.ProbePort
+	return state, err
 }
 
 func ReadSecret(dir string) (string, error) {
@@ -53,6 +64,7 @@ func BuildConfig(state State, coreAddr, secret string) ([]byte, []int, error) {
 	nodes := map[string]bool{}
 	proxies := []map[string]any{}
 	listeners := []map[string]any{}
+	activeNodes := []string{}
 	ports := []int{}
 	for _, n := range state.Nodes {
 		if !n.Enabled || !n.Available {
@@ -65,15 +77,72 @@ func BuildConfig(state State, coreAddr, secret string) ([]byte, []int, error) {
 		cfg["name"] = "node-" + n.ID
 		proxies = append(proxies, cfg)
 		nodes[n.ID] = true
+		activeNodes = append(activeNodes, "node-"+n.ID)
 	}
+	// A rule listener carries no proxy field, which is what sends its traffic
+	// through the rule engine instead of a single pinned outbound.
+	ruleReady := state.Routing.Enabled
 	for _, l := range state.Listeners {
-		if !l.Enabled || !nodes[l.NodeID] {
+		if !l.Enabled {
 			continue
 		}
-		listeners = append(listeners, map[string]any{"name": "listener-" + l.ID, "type": "mixed", "listen": "0.0.0.0", "port": l.Port, "proxy": "node-" + l.NodeID, "udp": true})
+		entry := map[string]any{"name": "listener-" + l.ID, "type": "mixed", "listen": "0.0.0.0", "port": l.Port, "udp": true}
+		if l.RuleMode() {
+			if !ruleReady {
+				continue
+			}
+		} else {
+			if !nodes[l.NodeID] {
+				continue
+			}
+			entry["proxy"] = "node-" + l.NodeID
+		}
+		listeners = append(listeners, entry)
 		ports = append(ports, l.Port)
 	}
-	cfg := map[string]any{"allow-lan": true, "bind-address": "*", "mode": "rule", "log-level": "info", "ipv6": false, "external-controller": coreAddr, "secret": secret, "proxies": proxies, "listeners": listeners, "rules": []string{"MATCH,REJECT"}, "profile": map[string]any{"store-selected": false}}
+
+	// The exit probe needs a way to reach a chosen node. A loopback-only
+	// listener bound to its own selector provides one without disturbing any
+	// listener that carries real traffic.
+	var probeGroup map[string]any
+	probePort := state.ProbePort
+	if probePort > 0 && len(activeNodes) > 0 {
+		members := []any{"DIRECT"}
+		for _, node := range activeNodes {
+			members = append(members, node)
+		}
+		probeGroup = map[string]any{"name": ExitProbeGroup, "type": "select", "proxies": members}
+		listeners = append(listeners, map[string]any{
+			"name": "exit-probe", "type": "mixed", "listen": "127.0.0.1", "port": probePort,
+			"proxy": ExitProbeGroup, "udp": false,
+		})
+		ports = append(ports, probePort)
+	}
+
+	groups, rules, providers, dns, _ := BuildRouting(state, activeNodes)
+	if probeGroup != nil {
+		groups = append(groups, probeGroup)
+	}
+	if len(rules) == 0 {
+		// Without a rule listener nothing may reach the rule engine, so the
+		// fallthrough stays a rejection rather than an accidental open proxy.
+		rules = []string{"MATCH,REJECT"}
+	}
+	cfg := map[string]any{
+		"allow-lan": true, "bind-address": "*", "mode": "rule", "log-level": "info", "ipv6": false,
+		"external-controller": coreAddr, "secret": secret,
+		"proxies": proxies, "listeners": listeners, "rules": rules,
+		"profile": map[string]any{"store-selected": false},
+	}
+	if len(groups) > 0 {
+		cfg["proxy-groups"] = groups
+	}
+	if len(providers) > 0 {
+		cfg["rule-providers"] = providers
+	}
+	if dns != nil {
+		cfg["dns"] = dns
+	}
 	raw, err := yaml.Marshal(cfg)
 	return raw, ports, err
 }
@@ -167,7 +236,7 @@ func (m *Manager) Bootstrap(ctx context.Context) error {
 func (m *Manager) Snapshot(ctx context.Context) (State, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.Store.Snapshot(ctx)
+	return m.snapshotLocked(ctx)
 }
 
 func (m *Manager) Change(ctx context.Context, fn func() error) (ApplyResult, error) {
@@ -190,7 +259,7 @@ func (m *Manager) Apply(ctx context.Context) ApplyResult {
 }
 
 func (m *Manager) applyLocked(ctx context.Context) ApplyResult {
-	state, err := m.Store.Snapshot(ctx)
+	state, err := m.snapshotLocked(ctx)
 	result := ApplyResult{Revision: state.Revision}
 	if err == nil {
 		err = m.applyConfig(ctx, state)

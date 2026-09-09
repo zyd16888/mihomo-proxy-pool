@@ -25,11 +25,28 @@
 | POST | `/api/subscriptions/{id}/sync` | 下载订阅并读取用量、同步节点 |
 | POST | `/api/subscriptions/{id}/usage` | 只刷新订阅用量，不重载配置 |
 | DELETE | `/api/subscriptions/{id}` | 删除订阅及其无引用节点 |
+| GET | `/api/routing` | 分流设置、规则集、可选策略和订阅合并报告 |
+| PUT | `/api/routing` | 保存分流设置 |
+| POST | `/api/rule-sets` | 新增规则集 |
+| PUT | `/api/rule-sets/{id}` | 完整更新规则集 |
+| DELETE | `/api/rule-sets/{id}` | 删除规则集 |
+| POST | `/api/rule-sets/refresh` | 立即让内核拉取全部启用的规则集 |
+| GET | `/api/logs?since=` | 读取内核日志窗口中序号大于 `since` 的条目 |
+| POST | `/api/logs/level` | `{ "level": "debug" }`，切换采集级别并重连日志流 |
+| DELETE | `/api/logs` | 清空内存中的日志窗口 |
+| GET | `/api/connections` | 当前连接，已还原为监听和节点名称 |
+| DELETE | `/api/connections` | 关闭全部连接 |
+| DELETE | `/api/connections/{id}` | 关闭单个连接 |
+| GET | `/api/exit-ip` | 读取出口 IP 探测结果和进度 |
+| POST | `/api/exit-ip/nodes` | `{ "ids": ["节点 ID"] }`，串行探测节点出口，返回 202 |
+| POST | `/api/exit-ip/listeners/{id}` | 探测某个监听端口的出口，返回 202 |
+| POST | `/api/exit-ip/batch/{id}/stop` | 停止指定的当前探测任务 |
 
-监听写入示例：
+监听写入示例。`mode` 为 `node` 时必须给出 `nodeId`；为 `rule` 时忽略 `nodeId`，出口由规则决定。省略 `mode` 按 `node` 处理，因此旧客户端行为不变。
 
 ```json
-{"name":"采集线路 A","port":17891,"nodeId":"节点 ID","enabled":true}
+{"name":"采集线路 A","port":17891,"mode":"node","nodeId":"节点 ID","enabled":true}
+{"name":"规则出口","port":17892,"mode":"rule","enabled":true}
 ```
 
 变更成功保存时返回 HTTP 200：
@@ -79,3 +96,71 @@
 数值为字节，到期为 Unix 秒。缺失值为 `null`；用量任一计数缺失时 `usedBytes` 为 `null`，总量缺失/为 0 时 `remainingBytes` 为 `null`。状态为 `current/missing/invalid/fetch_failed`。`updatedAt` 是最后有效快照时间，`checkedAt` 是最近检查时间。
 
 `POST /api/subscriptions/{id}/usage` 成功返回 `{ "usage": ... }`，不返回 `saved/apply`。缺失或格式异常的响应头会更新状态并返回 200；网络/HTTP 错误返回错误状态，但保留历史有效快照。并发刷新同一订阅返回 409。用量更新不增加配置版本。
+
+
+## 规则分流
+
+`GET /api/routing` 返回设置本身，以及按当前订阅计算出的合并结果。合并报告不依赖是否已存在规则监听，便于在创建监听前先确认结果。
+
+```json
+{
+  "routing": {"enabled":true,"defaultPolicy":"🌍 国外代理","mergeSubRules":true,"subRulePosition":500,
+              "allowGeoRules":false,"ruleSetProxy":"DIRECT","dnsEnabled":true,
+              "dnsDomestic":["https://223.5.5.5/dns-query"],"dnsForeign":["https://1.1.1.1/dns-query"]},
+  "ruleSets": [{"id":"…","name":"cn-domain","policy":"🎯 国内直连","behavior":"domain","format":"mrs",
+                "url":"https://…/cn.mrs","interval":86400,"noResolve":false,"enabled":true,
+                "position":700,"builtin":true}],
+  "policies": ["🌍 国外代理","🎯 国内直连","🛑 广告拦截","🚀 节点选择","🐟 漏网之鱼","DIRECT","REJECT"],
+  "reports": [{"subscription":"机场 A","groups":4,"rules":5,"providers":1,
+               "renamed":["🚀 节点选择 → [机场 A] 🚀 节点选择"],
+               "droppedGeo":1,"droppedRules":2,"droppedGroups":1}],
+  "groups": 10, "rules": 21, "providers": 7
+}
+```
+
+`reports` 说明每个订阅贡献了什么、丢弃了什么：`droppedGeo` 是被过滤的 GEOIP / GEOSITE 规则，`droppedRules` 是语法无法解析或指向未知策略的规则，`droppedGroups` 是解析后没有任何可用成员的策略组，`renamed` 是与内置组或其他订阅重名后被改名的策略组。
+
+规则集写入与其他配置变更一致，返回 `saved` / `apply` 包装并增加配置版本。`name` 只允许字母、数字、下划线、点和连字符，因为它同时作为磁盘缓存文件名；`mrs` 格式不支持 `classical`；`interval` 范围为 60 秒到 30 天。
+
+`POST /api/rule-sets/refresh` 不修改任何配置，也不增加版本；配置尚未成功应用时返回 409。返回 `{"refreshed":6,"failed":[]}`，`failed` 列出拉取失败的规则集名称。
+
+## 日志与连接
+
+`GET /api/logs` 是轮询接口，不是流式接口。服务在内存中保留最近 2000 条内核日志，客户端携带上次的 `nextSeq` 只取增量。
+
+```json
+{"entries":[{"seq":41,"time":"2026-09-09T09:20:00Z","level":"warning","payload":"[TCP] dial …"}],
+ "nextSeq":42,"level":"info","connected":true,"dropped":0}
+```
+
+`dropped` 是窗口滚动丢弃的条数，`connected` 表示与内核日志流的连接状态，`error` 在内核不可达时给出原因。单次响应最多返回 500 条。级别为 `debug/info/warning/error/silent`；`silent` 时不采集。
+
+内核不会为成功建立的连接输出「命中了哪条规则」的日志，因此**请求走向以 `/api/connections` 为准**，日志用于看 DNS 解析、失败原因和内核事件。
+
+```json
+{"connections":[{"id":"…","network":"TCP","kind":"HTTP","source":"127.0.0.1:5000","target":"example.com:443",
+                 "listener":"规则出口","listenerId":"…","port":"17892","chains":["🚀 节点选择","HK 01"],
+                 "rule":"RuleSet(cn-domain)","upload":83,"download":0,
+                 "startedAt":"2026-09-09T09:20:00Z","elapsedSeconds":12}],
+ "downloadTotal":0,"uploadTotal":83}
+```
+
+`listener` 和 `chains` 已把内核使用的 `listener-<id>` / `node-<id>` 还原成页面上的名称；监听已被删除时按内核原值返回且没有 `listenerId`。`chains` 按从入口到出口的顺序排列。日志和连接都只存在于内存，管理服务重启后清空。
+
+## 出口 IP 探测
+
+探测通过被测出口自身发起一次查询，因此得到的是对端看到的地址。查询服务默认为 `https://ip9.com.cn/get`。
+
+```json
+{"nodes":{"节点 ID":{"status":"success","ip":"203.0.113.9","country":"美国","region":"加州",
+                     "city":"洛杉矶","isp":"Cloudflare","asn":"AS13335",
+                     "checkedAt":"2026-09-09T09:20:00Z","inFlight":false}},
+ "listeners":{},"batch":{"id":"…","status":"completed","total":4,"completed":4,"succeeded":1,"failed":3},
+ "service":"https://ip9.com.cn/get"}
+```
+
+状态为 `queued/running/success/failed/cancelled`。请求未能通过该出口完成时返回 `failed` 且没有 `ip`，**不会退回直连给出宿主机地址**，否则不通的节点会显示成可用。
+
+节点探测通过一个仅监听 `127.0.0.1` 的内部端口进行，该端口绑定独立的探测策略组；探测只切换这个策略组，不影响任何承载实际流量的监听。探测串行执行并保持约 1 秒间隔，以符合查询服务每个来源地址 60 次/分钟的限制；已有探测在进行时再次发起返回错误。结果只保存在内存，管理服务重启后清空。
+
+监听探测走该监听端口本身。对规则监听来说，得到的是**查询服务域名按当前规则实际使用的出口**；`ip9.com.cn` 是国内域名，命中国内直连时显示的就是直连地址。要确认代理节点的出口，请探测节点。

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,14 +24,24 @@ type Server struct {
 	mu       sync.Mutex
 	sessions map[string]time.Time
 	Checks   *NodeChecks
+	Observer *Observer
+	Exits    *ExitProbes
 	syncing  map[string]bool
 }
 
 func NewServer(m *Manager, key string) *Server {
-	return &Server{Manager: m, AdminKey: key, sessions: map[string]time.Time{}, Checks: NewNodeChecks(m), syncing: map[string]bool{}}
+	return &Server{
+		Manager: m, AdminKey: key, sessions: map[string]time.Time{},
+		Checks: NewNodeChecks(m), Observer: NewObserver(m), Exits: NewExitProbes(m, m.ProbePort),
+		syncing: map[string]bool{},
+	}
 }
 
-func (s *Server) Close() { s.Checks.Close() }
+func (s *Server) Close() {
+	s.Checks.Close()
+	s.Observer.Close()
+	s.Exits.Close()
+}
 
 func respond(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -124,6 +135,37 @@ func (s *Server) Handler(assets http.Handler) http.Handler {
 	})
 	mux.HandleFunc("POST /api/subscriptions/{id}/sync", s.syncSubscription)
 	mux.HandleFunc("POST /api/subscriptions/{id}/usage", s.refreshSubscriptionUsage)
+	mux.HandleFunc("GET /api/logs", s.readLogs)
+	mux.HandleFunc("POST /api/logs/level", s.setLogLevel)
+	mux.HandleFunc("DELETE /api/logs", func(w http.ResponseWriter, r *http.Request) {
+		s.Observer.Clear()
+		respond(w, 200, s.Observer.Logs(0))
+	})
+	mux.HandleFunc("GET /api/connections", s.readConnections)
+	mux.HandleFunc("DELETE /api/connections", func(w http.ResponseWriter, r *http.Request) {
+		s.closeConnections(w, r, "")
+	})
+	mux.HandleFunc("DELETE /api/connections/{id}", func(w http.ResponseWriter, r *http.Request) {
+		s.closeConnections(w, r, r.PathValue("id"))
+	})
+	mux.HandleFunc("GET /api/routing", s.readRouting)
+	mux.HandleFunc("PUT /api/routing", s.saveRouting)
+	mux.HandleFunc("POST /api/rule-sets", s.saveRuleSet)
+	mux.HandleFunc("PUT /api/rule-sets/{id}", s.saveRuleSet)
+	mux.HandleFunc("DELETE /api/rule-sets/{id}", func(w http.ResponseWriter, r *http.Request) {
+		s.change(w, r, func() error { return s.Manager.Store.DeleteRuleSet(r.Context(), r.PathValue("id")) })
+	})
+	mux.HandleFunc("POST /api/rule-sets/refresh", s.refreshRuleSets)
+	mux.HandleFunc("GET /api/exit-ip", s.exitProbeState)
+	mux.HandleFunc("POST /api/exit-ip/nodes", s.startNodeExitProbe)
+	mux.HandleFunc("POST /api/exit-ip/listeners/{id}", s.startListenerExitProbe)
+	mux.HandleFunc("POST /api/exit-ip/batch/{id}/stop", func(w http.ResponseWriter, r *http.Request) {
+		if err := s.Exits.Stop(r.PathValue("id")); err != nil {
+			problem(w, 404, err)
+			return
+		}
+		s.writeExitProbes(w, r, http.StatusOK)
+	})
 	mux.Handle("/", assets)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -215,6 +257,10 @@ func (s *Server) saveListener(w http.ResponseWriter, r *http.Request) {
 			problem(w, 400, fmt.Errorf("端口 %d 已保留给管理服务", p))
 			return
 		}
+	}
+	if l.Port == s.Manager.ProbePort {
+		problem(w, 400, fmt.Errorf("端口 %d 已保留给出口 IP 探测", l.Port))
+		return
 	}
 	s.change(w, r, func() error { return s.Manager.Store.SaveListener(r.Context(), l) })
 }
@@ -360,6 +406,7 @@ func (s *Server) refreshSubscription(w http.ResponseWriter, r *http.Request, imp
 		problem(w, 400, err)
 		return
 	}
+	profile := importer.ParseProfile(string(raw))
 	s.change(w, r, func() error {
 		current, err := s.Manager.Store.Snapshot(r.Context())
 		if err != nil {
@@ -367,11 +414,190 @@ func (s *Server) refreshSubscription(w http.ResponseWriter, r *http.Request, imp
 		}
 		for _, latest := range current.Subscriptions {
 			if latest.ID == sub.ID && latest.URL == sub.URL {
-				return s.Manager.Store.Import(r.Context(), sub.ID, items)
+				return s.Manager.Store.ImportSubscription(r.Context(), sub.ID, items, profile)
 			}
 		}
 		return errors.New("下载期间订阅已修改，请重新同步")
 	})
+}
+
+func (s *Server) readLogs(w http.ResponseWriter, r *http.Request) {
+	since, err := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+	if err != nil || since < 0 {
+		since = 0
+	}
+	respond(w, 200, s.Observer.Logs(since))
+}
+
+func (s *Server) setLogLevel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Level string `json:"level"`
+	}
+	if err := readJSON(w, r, &req); err != nil {
+		problem(w, 400, err)
+		return
+	}
+	if err := s.Observer.SetLevel(strings.ToLower(strings.TrimSpace(req.Level))); err != nil {
+		problem(w, 400, err)
+		return
+	}
+	respond(w, 200, s.Observer.Logs(0))
+}
+
+func (s *Server) readConnections(w http.ResponseWriter, r *http.Request) {
+	state, err := s.Manager.Snapshot(r.Context())
+	if err != nil {
+		problem(w, 500, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	snapshot, err := s.Observer.Connections(ctx, state)
+	if err != nil {
+		problem(w, 503, errors.New("内核未就绪，暂时无法读取连接"))
+		return
+	}
+	respond(w, 200, snapshot)
+}
+
+func (s *Server) closeConnections(w http.ResponseWriter, r *http.Request, id string) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	var err error
+	if id == "" {
+		err = s.Manager.Kernel.CloseConnections(ctx)
+	} else {
+		err = s.Manager.Kernel.CloseConnection(ctx, id)
+	}
+	if err != nil {
+		problem(w, 502, errors.New("关闭连接失败，请确认内核状态"))
+		return
+	}
+	respond(w, 200, map[string]bool{"closed": true})
+}
+
+// routingView reports the settings together with what the current
+// subscriptions would actually contribute, so merge results are visible
+// before the configuration is applied.
+func (s *Server) readRouting(w http.ResponseWriter, r *http.Request) {
+	state, err := s.Manager.Snapshot(r.Context())
+	if err != nil {
+		problem(w, 500, err)
+		return
+	}
+	preview := state
+	// Merge reporting must not depend on a rule listener already existing.
+	preview.Listeners = append([]Listener{}, state.Listeners...)
+	if !hasRuleListener(preview) {
+		preview.Listeners = append(preview.Listeners, Listener{ID: "preview", Port: 0, Mode: ListenerModeRule, Enabled: true})
+	}
+	active := []string{}
+	for _, n := range state.Nodes {
+		if n.Enabled && n.Available {
+			active = append(active, "node-"+n.ID)
+		}
+	}
+	groups, rules, providers, _, reports := BuildRouting(preview, active)
+	respond(w, 200, map[string]any{
+		"routing":   state.Routing,
+		"ruleSets":  state.RuleSets,
+		"policies":  PolicyTargets,
+		"reports":   reports,
+		"groups":    len(groups),
+		"rules":     len(rules),
+		"providers": len(providers),
+	})
+}
+
+func (s *Server) saveRouting(w http.ResponseWriter, r *http.Request) {
+	var routing Routing
+	if err := readJSON(w, r, &routing); err != nil {
+		problem(w, 400, err)
+		return
+	}
+	s.change(w, r, func() error { return s.Manager.Store.SaveRouting(r.Context(), routing) })
+}
+
+func (s *Server) saveRuleSet(w http.ResponseWriter, r *http.Request) {
+	var set RuleSet
+	if err := readJSON(w, r, &set); err != nil {
+		problem(w, 400, err)
+		return
+	}
+	set.ID = r.PathValue("id")
+	s.change(w, r, func() error { return s.Manager.Store.SaveRuleSet(r.Context(), set) })
+}
+
+// refreshRuleSets asks the kernel to pull every enabled provider now instead
+// of waiting for its interval. It changes no stored configuration.
+func (s *Server) refreshRuleSets(w http.ResponseWriter, r *http.Request) {
+	state, err := s.Manager.Snapshot(r.Context())
+	if err != nil {
+		problem(w, 500, err)
+		return
+	}
+	if state.Revision != state.AppliedRevision || state.LastError != "" {
+		problem(w, 409, errors.New("请先成功应用当前配置，再更新规则集"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
+	defer cancel()
+	refreshed, failed := 0, []string{}
+	for _, set := range state.RuleSets {
+		if !set.Enabled {
+			continue
+		}
+		if err := s.Manager.Kernel.RefreshRuleProvider(ctx, set.Name); err != nil {
+			failed = append(failed, set.Name)
+			continue
+		}
+		refreshed++
+	}
+	respond(w, 200, map[string]any{"refreshed": refreshed, "failed": failed})
+}
+
+func (s *Server) writeExitProbes(w http.ResponseWriter, r *http.Request, status int) {
+	state, err := s.Manager.Snapshot(r.Context())
+	if err != nil {
+		problem(w, 500, err)
+		return
+	}
+	respond(w, status, s.Exits.Snapshot(state))
+}
+
+func (s *Server) exitProbeState(w http.ResponseWriter, r *http.Request) {
+	s.writeExitProbes(w, r, http.StatusOK)
+}
+
+func (s *Server) startNodeExitProbe(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := readJSON(w, r, &req); err != nil {
+		problem(w, 400, err)
+		return
+	}
+	if len(req.IDs) == 0 {
+		problem(w, 400, errors.New("请选择要探测的节点"))
+		return
+	}
+	if s.Manager.ProbePort == 0 {
+		problem(w, 409, errors.New("未配置出口探测端口，无法按节点探测"))
+		return
+	}
+	if err := s.Exits.StartNodes(r.Context(), req.IDs); err != nil {
+		problem(w, 400, err)
+		return
+	}
+	s.writeExitProbes(w, r, http.StatusAccepted)
+}
+
+func (s *Server) startListenerExitProbe(w http.ResponseWriter, r *http.Request) {
+	if err := s.Exits.StartListener(r.Context(), r.PathValue("id")); err != nil {
+		problem(w, 400, err)
+		return
+	}
+	s.writeExitProbes(w, r, http.StatusAccepted)
 }
 
 func (s *Server) checkNode(w http.ResponseWriter, r *http.Request) {

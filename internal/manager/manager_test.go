@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -153,6 +154,15 @@ type fakeKernel struct {
 	failReload  bool
 	failVerify  bool
 	reloads     int
+	connections CoreConnections
+	closed      []string
+	refreshed   []string
+	logLines    []string
+	logLevel    string
+	logErr      error
+	selected    []string
+	selectErr   error
+	selectGate  chan struct{}
 	mu          sync.Mutex
 }
 
@@ -176,6 +186,74 @@ func (f *fakeKernel) Verify(context.Context, []int, []int) error {
 }
 func (f *fakeKernel) Version(context.Context) (string, error)    { return "test", nil }
 func (f *fakeKernel) Delay(context.Context, string) (int, error) { return 12, nil }
+func (f *fakeKernel) Connections(context.Context) (CoreConnections, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.connections, nil
+}
+func (f *fakeKernel) CloseConnection(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed = append(f.closed, id)
+	return nil
+}
+func (f *fakeKernel) CloseConnections(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed = append(f.closed, "*")
+	return nil
+}
+func (f *fakeKernel) RefreshRuleProvider(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refreshed = append(f.refreshed, name)
+	return nil
+}
+func (f *fakeKernel) SelectProxy(ctx context.Context, group, name string) error {
+	f.mu.Lock()
+	gate := f.selectGate
+	err := f.selectErr
+	if err == nil {
+		f.selected = append(f.selected, group+"="+name)
+	}
+	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	// A gate lets a test hold a probe open long enough to observe that a
+	// second one is refused.
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// StreamLogs replays a fixed script and then blocks, matching a kernel that
+// stays connected with nothing further to say.
+func (f *fakeKernel) StreamLogs(ctx context.Context, level string) (io.ReadCloser, error) {
+	f.mu.Lock()
+	f.logLevel = level
+	lines := f.logLines
+	f.mu.Unlock()
+	if f.logErr != nil {
+		return nil, f.logErr
+	}
+	reader, writer := io.Pipe()
+	go func() {
+		for _, line := range lines {
+			if _, err := io.WriteString(writer, line+"\n"); err != nil {
+				return
+			}
+		}
+		<-ctx.Done()
+		writer.CloseWithError(ctx.Err())
+	}()
+	return reader, nil
+}
 func managerForTest(t *testing.T) (*Manager, *fakeKernel) {
 	t.Helper()
 	s := storeForTest(t)

@@ -34,7 +34,10 @@ func OpenStore(path string) (*Store, error) {
 		`CREATE TABLE IF NOT EXISTS subscriptions(id TEXT PRIMARY KEY,name TEXT NOT NULL,url TEXT NOT NULL UNIQUE,updated_at TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS subscription_usage(subscription_id TEXT PRIMARY KEY REFERENCES subscriptions(id) ON DELETE CASCADE,upload_bytes INTEGER,download_bytes INTEGER,total_bytes INTEGER,expire INTEGER,updated_at TEXT NOT NULL DEFAULT '',checked_at TEXT NOT NULL,status TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS nodes(id TEXT PRIMARY KEY,name TEXT NOT NULL,source_id TEXT NOT NULL,identity TEXT NOT NULL,protocol TEXT NOT NULL,server TEXT NOT NULL,port INTEGER NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,available INTEGER NOT NULL DEFAULT 1,config TEXT NOT NULL,UNIQUE(source_id,name))`,
-		`CREATE TABLE IF NOT EXISTS listeners(id TEXT PRIMARY KEY,name TEXT NOT NULL,port INTEGER NOT NULL UNIQUE CHECK(port BETWEEN 1 AND 65535),node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE RESTRICT,enabled INTEGER NOT NULL DEFAULT 1)`,
+		listenersSchema,
+		`CREATE TABLE IF NOT EXISTS rule_sets(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,policy TEXT NOT NULL,behavior TEXT NOT NULL,format TEXT NOT NULL,url TEXT NOT NULL,interval INTEGER NOT NULL,no_resolve INTEGER NOT NULL DEFAULT 0,enabled INTEGER NOT NULL DEFAULT 1,position INTEGER NOT NULL DEFAULT 500,builtin INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE IF NOT EXISTS routing(id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL DEFAULT 1,default_policy TEXT NOT NULL,merge_sub_rules INTEGER NOT NULL DEFAULT 1,sub_rule_position INTEGER NOT NULL DEFAULT 500,allow_geo_rules INTEGER NOT NULL DEFAULT 0,rule_set_proxy TEXT NOT NULL DEFAULT 'DIRECT',dns_enabled INTEGER NOT NULL DEFAULT 1,dns_domestic TEXT NOT NULL DEFAULT '',dns_foreign TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE IF NOT EXISTS subscription_profiles(subscription_id TEXT PRIMARY KEY REFERENCES subscriptions(id) ON DELETE CASCADE,groups TEXT NOT NULL,rules TEXT NOT NULL,providers TEXT NOT NULL,group_count INTEGER NOT NULL DEFAULT 0,rule_count INTEGER NOT NULL DEFAULT 0,provider_count INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL DEFAULT 0,applied_revision INTEGER NOT NULL DEFAULT -1,last_error TEXT NOT NULL DEFAULT '',applied_at TEXT NOT NULL DEFAULT '')`,
 		`INSERT OR IGNORE INTO state(id) VALUES(1)`,
 	} {
@@ -43,7 +46,103 @@ func OpenStore(path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	return &Store{db}, nil
+	store := &Store{db}
+	if err := store.migrateListeners(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := store.seedRouting(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+// node_id is nullable because a rule listener resolves its outbound per
+// request instead of binding one node.
+const listenersSchema = `CREATE TABLE IF NOT EXISTS listeners(
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	port INTEGER NOT NULL UNIQUE CHECK(port BETWEEN 1 AND 65535),
+	mode TEXT NOT NULL DEFAULT 'node' CHECK(mode IN ('node','rule')),
+	node_id TEXT REFERENCES nodes(id) ON DELETE RESTRICT,
+	enabled INTEGER NOT NULL DEFAULT 1,
+	CHECK(mode='rule' OR node_id IS NOT NULL))`
+
+// Databases written before rule listeners existed have a NOT NULL node_id and
+// no mode column, neither of which SQLite can alter in place.
+func (s *Store) migrateListeners() error {
+	rows, err := s.db.Query(`PRAGMA table_info(listeners)`)
+	if err != nil {
+		return err
+	}
+	hasMode := false
+	for rows.Next() {
+		var index int
+		var name, kind string
+		var notNull, primary int
+		var fallback any
+		if err := rows.Scan(&index, &name, &kind, &notNull, &fallback, &primary); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "mode" {
+			hasMode = true
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil || hasMode {
+		return err
+	}
+	if _, err := s.db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		return err
+	}
+	defer s.db.Exec(`PRAGMA foreign_keys=ON`)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		strings.Replace(listenersSchema, "IF NOT EXISTS listeners", "listeners_migrated", 1),
+		`INSERT INTO listeners_migrated(id,name,port,mode,node_id,enabled) SELECT id,name,port,'node',node_id,enabled FROM listeners`,
+		`DROP TABLE listeners`,
+		`ALTER TABLE listeners_migrated RENAME TO listeners`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// Rule sets are seeded only when the routing row is first created, so a user
+// who removes a default set does not get it back on the next restart.
+func (s *Store) seedRouting() error {
+	defaults := DefaultRouting()
+	result, err := s.db.Exec(`INSERT OR IGNORE INTO routing(id,enabled,default_policy,merge_sub_rules,sub_rule_position,allow_geo_rules,rule_set_proxy,dns_enabled,dns_domestic,dns_foreign)
+		VALUES(1,1,?,1,?,0,?,1,?,?)`,
+		defaults.DefaultPolicy, defaults.SubRulePosition, defaults.RuleSetProxy,
+		strings.Join(defaults.DNSDomestic, "\n"), strings.Join(defaults.DNSForeign, "\n"))
+	if err != nil {
+		return err
+	}
+	created, err := result.RowsAffected()
+	if err != nil || created == 0 {
+		return err
+	}
+	for _, set := range DefaultRuleSets() {
+		if set.Interval == 0 {
+			set.Interval = 86400
+		}
+		if _, err := s.db.Exec(`INSERT INTO rule_sets(id,name,policy,behavior,format,url,interval,no_resolve,enabled,position,builtin)
+			VALUES(?,?,?,?,?,?,?,?,1,?,1)`,
+			newID(), set.Name, set.Policy, set.Behavior, set.Format, set.URL, set.Interval, set.NoResolve, set.Position); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -89,13 +188,13 @@ func (s *Store) Snapshot(ctx context.Context) (State, error) {
 	if err != nil {
 		return state, err
 	}
-	rows, err = s.db.QueryContext(ctx, `SELECT id,name,port,node_id,enabled FROM listeners ORDER BY port`)
+	rows, err = s.db.QueryContext(ctx, `SELECT id,name,port,mode,COALESCE(node_id,''),enabled FROM listeners ORDER BY port`)
 	if err != nil {
 		return state, err
 	}
 	for rows.Next() {
 		var l Listener
-		if err = rows.Scan(&l.ID, &l.Name, &l.Port, &l.NodeID, &l.Enabled); err != nil {
+		if err = rows.Scan(&l.ID, &l.Name, &l.Port, &l.Mode, &l.NodeID, &l.Enabled); err != nil {
 			rows.Close()
 			return state, err
 		}
@@ -107,16 +206,21 @@ func (s *Store) Snapshot(ctx context.Context) (State, error) {
 		return state, err
 	}
 	rows, err = s.db.QueryContext(ctx, `SELECT s.id,s.name,s.url,s.updated_at,u.subscription_id,
-		u.upload_bytes,u.download_bytes,u.total_bytes,u.expire,COALESCE(u.updated_at,''),COALESCE(u.checked_at,''),COALESCE(u.status,'')
-		FROM subscriptions s LEFT JOIN subscription_usage u ON u.subscription_id=s.id ORDER BY s.name`)
+		u.upload_bytes,u.download_bytes,u.total_bytes,u.expire,COALESCE(u.updated_at,''),COALESCE(u.checked_at,''),COALESCE(u.status,''),
+		p.subscription_id,COALESCE(p.group_count,0),COALESCE(p.rule_count,0),COALESCE(p.provider_count,0),COALESCE(p.updated_at,'')
+		FROM subscriptions s
+		LEFT JOIN subscription_usage u ON u.subscription_id=s.id
+		LEFT JOIN subscription_profiles p ON p.subscription_id=s.id ORDER BY s.name`)
 	if err != nil {
 		return state, err
 	}
 	for rows.Next() {
 		var sub Subscription
-		var usageID *string
+		var usageID, profileID *string
 		var usage SubscriptionUsage
-		if err = rows.Scan(&sub.ID, &sub.Name, &sub.URL, &sub.UpdatedAt, &usageID, &usage.UploadBytes, &usage.DownloadBytes, &usage.TotalBytes, &usage.Expire, &usage.UpdatedAt, &usage.CheckedAt, &usage.Status); err != nil {
+		var profile ProfileSummary
+		if err = rows.Scan(&sub.ID, &sub.Name, &sub.URL, &sub.UpdatedAt, &usageID, &usage.UploadBytes, &usage.DownloadBytes, &usage.TotalBytes, &usage.Expire, &usage.UpdatedAt, &usage.CheckedAt, &usage.Status,
+			&profileID, &profile.Groups, &profile.Rules, &profile.Providers, &profile.UpdatedAt); err != nil {
 			rows.Close()
 			return state, err
 		}
@@ -124,11 +228,23 @@ func (s *Store) Snapshot(ctx context.Context) (State, error) {
 			usage.calculate()
 			sub.Usage = &usage
 		}
+		if profileID != nil {
+			sub.Profile = &profile
+		}
 		state.Subscriptions = append(state.Subscriptions, sub)
 	}
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
+		return state, err
+	}
+	if state.RuleSets, err = s.ruleSets(ctx); err != nil {
+		return state, err
+	}
+	if state.Routing, err = s.routing(ctx); err != nil {
+		return state, err
+	}
+	if state.Profiles, err = s.subscriptionProfiles(ctx); err != nil {
 		return state, err
 	}
 	err = s.db.QueryRowContext(ctx, `SELECT revision,applied_revision,last_error,applied_at FROM state WHERE id=1`).Scan(&state.Revision, &state.AppliedRevision, &state.LastError, &state.AppliedAt)
@@ -172,13 +288,32 @@ func (s *Store) SaveListener(ctx context.Context, l Listener) error {
 	if l.Port < 1 || l.Port > 65535 {
 		return errors.New("监听端口范围为 1–65535")
 	}
+	if l.Mode == "" {
+		l.Mode = ListenerModeNode
+	}
+	if l.Mode != ListenerModeNode && l.Mode != ListenerModeRule {
+		return errors.New("监听模式必须是固定节点或规则分流")
+	}
 	return s.mutate(ctx, func(tx *sql.Tx) error {
-		var enabled, available bool
-		if err := tx.QueryRowContext(ctx, `SELECT enabled,available FROM nodes WHERE id=?`, l.NodeID).Scan(&enabled, &available); err != nil {
-			return errors.New("绑定节点不存在")
-		}
-		if l.Enabled && (!enabled || !available) {
-			return errors.New("绑定节点已停用或不在当前订阅中，请选择可用节点")
+		var node any
+		if l.RuleMode() {
+			l.NodeID = ""
+			var routingEnabled bool
+			if err := tx.QueryRowContext(ctx, `SELECT enabled FROM routing WHERE id=1`).Scan(&routingEnabled); err != nil {
+				return err
+			}
+			if l.Enabled && !routingEnabled {
+				return errors.New("规则分流已关闭，请先在分流设置中启用")
+			}
+		} else {
+			var enabled, available bool
+			if err := tx.QueryRowContext(ctx, `SELECT enabled,available FROM nodes WHERE id=?`, l.NodeID).Scan(&enabled, &available); err != nil {
+				return errors.New("绑定节点不存在")
+			}
+			if l.Enabled && (!enabled || !available) {
+				return errors.New("绑定节点已停用或不在当前订阅中，请选择可用节点")
+			}
+			node = l.NodeID
 		}
 		var other int
 		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM listeners WHERE port=? AND id<>?`, l.Port, l.ID).Scan(&other); err != nil {
@@ -188,10 +323,10 @@ func (s *Store) SaveListener(ctx context.Context, l Listener) error {
 			return errors.New("该端口已被另一个监听使用")
 		}
 		if l.ID == "" {
-			_, err := tx.ExecContext(ctx, `INSERT INTO listeners(id,name,port,node_id,enabled) VALUES(?,?,?,?,?)`, newID(), l.Name, l.Port, l.NodeID, l.Enabled)
+			_, err := tx.ExecContext(ctx, `INSERT INTO listeners(id,name,port,mode,node_id,enabled) VALUES(?,?,?,?,?,?)`, newID(), l.Name, l.Port, l.Mode, node, l.Enabled)
 			return err
 		}
-		return changed(tx.ExecContext(ctx, `UPDATE listeners SET name=?,port=?,node_id=?,enabled=? WHERE id=?`, l.Name, l.Port, l.NodeID, l.Enabled, l.ID))
+		return changed(tx.ExecContext(ctx, `UPDATE listeners SET name=?,port=?,mode=?,node_id=?,enabled=? WHERE id=?`, l.Name, l.Port, l.Mode, node, l.Enabled, l.ID))
 	})
 }
 
@@ -253,6 +388,16 @@ func (s *Store) DeleteSubscription(ctx context.Context, id string) error {
 // Source + name is the stable subscription key; identical proxy identity also
 // preserves bindings across a rename. Removed entries remain as unavailable tombstones.
 func (s *Store) Import(ctx context.Context, source string, items []importer.Proxy) error {
+	return s.importInto(ctx, source, items, nil)
+}
+
+// ImportSubscription stores nodes and routing rules from one sync in a single
+// transaction, so the two never describe different versions of a subscription.
+func (s *Store) ImportSubscription(ctx context.Context, source string, items []importer.Proxy, profile importer.Profile) error {
+	return s.importInto(ctx, source, items, &profile)
+}
+
+func (s *Store) importInto(ctx context.Context, source string, items []importer.Proxy, profile *importer.Profile) error {
 	if len(items) == 0 {
 		return errors.New("订阅未包含有效节点，保留原数据")
 	}
@@ -333,6 +478,11 @@ func (s *Store) Import(ctx context.Context, source string, items []importer.Prox
 			}
 		}
 		if source != "" {
+			if profile != nil {
+				if err := saveProfile(ctx, tx, source, *profile); err != nil {
+					return err
+				}
+			}
 			_, err := tx.ExecContext(ctx, `UPDATE subscriptions SET updated_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339), source)
 			return err
 		}

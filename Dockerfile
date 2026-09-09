@@ -18,7 +18,7 @@ COPY docker/ /etc/mihomo-manager/
 COPY docs/THIRD_PARTY_NOTICES.md /usr/share/doc/mihomo-manager/THIRD_PARTY_NOTICES.md
 COPY docs/third-party/ /usr/share/doc/mihomo-manager/third-party/
 RUN chmod +x /etc/mihomo-manager/entrypoint.sh
-ENV DATA_DIR=/data CONTROL_ADDR=0.0.0.0:3481 MIHOMO_CONTROL_ADDR=127.0.0.1:9090 TZ=Asia/Shanghai
+ENV DATA_DIR=/data CONTROL_ADDR=0.0.0.0:3481 MIHOMO_CONTROL_ADDR=127.0.0.1:9090 EXIT_PROBE_PORT=37891 TZ=Asia/Shanghai
 VOLUME /data
 EXPOSE 3481
 HEALTHCHECK --interval=20s --timeout=5s --start-period=30s --retries=3 CMD ["/usr/local/bin/mihomo-manager", "-healthcheck"]
