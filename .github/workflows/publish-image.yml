@@ -1,0 +1,155 @@
+name: Build and publish container
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Test application and container
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: mihomo-manager:ci
+          cache-from: type=gha,scope=mihomo-manager
+          cache-to: type=gha,mode=max,scope=mihomo-manager
+
+      - name: Test with the bundled kernel
+        shell: bash
+        run: |
+          docker create --name mihomo-kernel-test mihomo-manager:ci
+          docker cp mihomo-kernel-test:/usr/local/bin/mihomo "$RUNNER_TEMP/mihomo"
+          chmod +x "$RUNNER_TEMP/mihomo"
+          export MIHOMO_TEST_BIN="$RUNNER_TEMP/mihomo"
+          go test -race ./...
+          go vet ./...
+
+      - name: Check first boot and container restart
+        shell: bash
+        run: |
+          docker run -d --name mihomo-manager-test --network host \
+            -e ADMIN_KEY=ci-only-disposable-admin-key mihomo-manager:ci
+          wait_healthy() {
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent --max-time 3 http://127.0.0.1:3481/healthz > /dev/null; then
+                docker exec mihomo-manager-test mihomo-manager -healthcheck
+                return 0
+              fi
+              sleep 2
+            done
+            docker logs mihomo-manager-test
+            return 1
+          }
+          wait_healthy
+          docker restart mihomo-manager-test
+          wait_healthy
+
+      - name: Clean up test containers
+        if: always()
+        shell: bash
+        run: docker rm -fv mihomo-kernel-test mihomo-manager-test || true
+
+  publish:
+    name: Publish amd64 and arm64 image
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Resolve GHCR image name
+        id: image
+        shell: bash
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image tags and labels
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+          labels: |
+            org.opencontainers.image.title=Mihomo Manager
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha,scope=mihomo-manager
+          cache-to: type=gha,mode=max,scope=mihomo-manager
+
+      - name: Write published image summary
+        env:
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          IMAGE_TAGS: ${{ steps.metadata.outputs.tags }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          {
+            echo "## Published container"
+            echo
+            echo '```text'
+            echo "$IMAGE_TAGS"
+            echo '```'
+            echo
+            echo "Immutable image: \`$IMAGE_NAME@$IMAGE_DIGEST\`"
+            echo
+            echo 'Set MIHOMO_IMAGE in .env, then run `docker compose pull` and `docker compose up -d`.'
+          } >> "$GITHUB_STEP_SUMMARY"

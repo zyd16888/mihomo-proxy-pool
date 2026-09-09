@@ -1,0 +1,8 @@
+# 开发者本地构建覆盖文件，普通用户无需使用。
+# docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  mihomo-manager:
+    build:
+      context: .
+      args:
+        MIHOMO_VERSION: v1.19.30

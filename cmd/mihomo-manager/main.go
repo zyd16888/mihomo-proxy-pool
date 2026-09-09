@@ -69,7 +69,8 @@ func run() error {
 		return err
 	}
 	defer store.Close()
-	kernel := manager.NewRuntime(env("MIHOMO_BIN", "mihomo"), dir, "http://"+coreAddr, secret)
+	// The image owns the kernel installation; native development resolves it via PATH.
+	kernel := manager.NewRuntime("mihomo", dir, "http://"+coreAddr, secret)
 	m := &manager.Manager{Store: store, Kernel: kernel, Dir: dir, CoreAddr: coreAddr, Secret: secret}
 	for _, a := range []string{addr, coreAddr} {
 		host, port, err := net.SplitHostPort(a)

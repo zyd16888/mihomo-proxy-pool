@@ -1,10 +1,6 @@
 services:
   mihomo-manager:
-    build:
-      context: .
-      args:
-        MIHOMO_VERSION: v1.19.30
-    image: mihomo-manager:local
+    image: ${MIHOMO_IMAGE:?请在 .env 中设置已发布的 GHCR 镜像地址}
     network_mode: host
     restart: unless-stopped
     stop_grace_period: 75s

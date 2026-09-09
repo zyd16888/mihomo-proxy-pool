@@ -11,15 +11,22 @@
 
 支持新增、编辑、换绑、启停和删除监听。端口使用 `mixed`，同时提供 HTTP / SOCKS5；监听固定绑定具体节点，无随机分配或自动故障切换。删除监听不会删除节点，节点被引用时不能直接删除。
 
-## Docker 部署
+## 使用 GHCR 镜像部署
 
 适用于 Linux Docker / 支持 host 网络的 Linux NAS。Windows/macOS Docker Desktop 的 host 网络能力依赖其版本与设置，不属于当前容器验收范围。
 
+普通用户只需要 `docker-compose.yml` 和 `.env.example`，不需要下载源码、安装 Go 或构建镜像。
+
 ```sh
 cp .env.example .env
-# 编辑 .env，设置至少 12 字符的 ADMIN_KEY。
-docker compose up -d --build
+# 编辑 .env：设置 ADMIN_KEY，并将 MIHOMO_IMAGE 改为项目的实际镜像地址。
+docker compose pull
+docker compose up -d
 ```
+
+本项目镜像地址为 `ghcr.io/zyd16888/mihomo-proxy-pool:latest`。也可以使用固定版本，例如 `:1.2.3`。实际发布的地址会显示在 GitHub Actions 的运行摘要和仓库 Packages 中；首次成功发布前，该镜像尚不可拉取。
+
+Mihomo 内核已经包含在镜像内，路径由镜像维护，用户无需配置或挂载内核二进制。
 
 打开 `http://宿主机IP:3481`，使用 `ADMIN_KEY` 登录。首次启动自动创建数据库和最小运行配置，不需要预先提供订阅或配置文件。
 
@@ -34,21 +41,41 @@ docker compose up -d --build
 | 环境变量 | 默认值 | 作用 |
 | --- | --- | --- |
 | `ADMIN_KEY` | 必填 | 管理页登录口令，至少 12 字符 |
+| `MIHOMO_IMAGE` | 必填 | Compose 使用的已发布镜像地址；不传入应用容器 |
 | `DATA_DIR` | 镜像内 `/data` | 持久数据目录 |
 | `CONTROL_ADDR` | `0.0.0.0:3481` | 管理页地址 |
 | `MIHOMO_CONTROL_ADDR` | `127.0.0.1:9090` | 必须绑定回环地址的内核控制接口 |
-| `MIHOMO_BIN` | 镜像内 `/usr/local/bin/mihomo` | 内核二进制路径 |
 | `TZ` | `Asia/Shanghai` | 时区 |
 
-核心版本在 Docker 构建参数 `MIHOMO_VERSION` 中固定为 `v1.19.30`。默认构建复用官方镜像中的二进制，支持构建 `linux/amd64` 与 `linux/arm64`；平台跟随构建目标，不再硬编码 amd64。修改内核版本后重新构建镜像。
+已发布镜像同时包含 `linux/amd64` 和 `linux/arm64`，Docker 会自动选择对应架构。内核版本由项目维护者在镜像构建时确定，用户通过更新镜像升级。
 
 ```sh
+# 更新镜像并重建容器，./data 中的数据保留
+docker compose pull
+docker compose up -d
+
 docker compose logs -f --tail=100
 docker compose ps
 docker compose down
 ```
 
 健康检查同时检查管理 HTTP 服务和内核。Tini 与 Supervisor 负责信号和进程回收；管理服务先停止，内核后停止。进程异常退出会重启，启动重试耗尽时关闭整个容器，交给 Docker 的 `unless-stopped` 策略恢复。
+
+## GitHub Actions 发布镜像
+
+工作流：[`.github/workflows/publish-image.yml`](.github/workflows/publish-image.yml)。
+
+- 推送到 `main` / `master`、推送 `v*` 标签，或在 Actions 中手动执行时触发。
+- 先构建 amd64 测试镜像，用镜像内核运行现有测试（包括真实监听联调和 race）、`go vet`，再检查容器空目录启动和整容器重启。
+- 检查成功后构建并发布 `linux/amd64,linux/arm64` 多架构镜像到 `ghcr.io/<owner>/<repo>`。
+- 镜像名自动使用当前 GitHub 仓库并转为小写，无需在工作流中填写仓库地址。
+- 默认分支发布 `latest`，分支还会发布 `main` / `master` 标签；语义版本标签 `v1.2.3` 发布 `1.2.3`、`1.2`，稳定版本也更新 `latest`。预发布版本不自动更新 `latest`。每次构建另带 `sha-<完整提交号>`。
+
+推送代码到自己的 GitHub 仓库后，确认 Actions 已启用。工作流使用自带的 `GITHUB_TOKEN`，只在发布任务授予 `packages: write`，通常不需要额外配置 PAT。
+
+**首次发布后，需要到 GHCR 包的 Package settings 将可见性设为 Public，普通用户才能免登录拉取。** GitHub 仓库公开不代表新建的 GHCR 包自动公开。如果同名包已经存在，还需确认它允许当前仓库的 Actions 写入。
+
+工作流文件的加入不会立即发布镜像；只有提交并推送到 GitHub 后，才会在 Actions 中执行。当前 GitHub 仓库为 [zyd16888/mihomo-proxy-pool](https://github.com/zyd16888/mihomo-proxy-pool)；Fork 后工作流会自动发布到 Fork 仓库对应的 GHCR 地址，部署时同步修改 `.env` 中的镜像地址。
 
 ## 数据与应用语义
 
@@ -104,7 +131,15 @@ $env:MIHOMO_TEST_BIN = 'D:/tools/mihomo.exe'
 go test -v ./...
 ```
 
-本地分进程运行：设置 `ADMIN_KEY`、`DATA_DIR`、`CONTROL_ADDR`、`MIHOMO_CONTROL_ADDR`、`MIHOMO_BIN`，先执行 `mihomo-manager -bootstrap`，再使用相同数据目录启动 `mihomo -d <DATA_DIR> -f <DATA_DIR>/config.yaml`，最后启动管理服务。该方式用于开发，Docker 镜像已自动完成这些步骤。
+本地分进程运行：将官方内核命名为 `mihomo`（Windows 为 `mihomo.exe`）并加入 `PATH`；设置 `ADMIN_KEY`、`DATA_DIR`、`CONTROL_ADDR`、`MIHOMO_CONTROL_ADDR`，先执行 `mihomo-manager -bootstrap`，再使用相同数据目录启动 `mihomo -d <DATA_DIR> -f <DATA_DIR>/config.yaml`，最后启动管理服务。该方式用于开发，Docker 镜像已自动完成这些步骤。
+
+开发者需要本地构建容器时使用单独的覆盖文件，普通部署不使用它：
+
+```sh
+MIHOMO_IMAGE=mihomo-manager:local docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
+内核构建版本在 `Dockerfile` 的 `MIHOMO_VERSION` 中固定为 `v1.19.30`；本地覆盖文件使用同一版本。维护者调整版本后，应通过工作流重新测试并发布镜像。
 
 具体接口见 [API 文档](docs/API.md)，本次验证记录见 [验证记录](docs/VALIDATION.md)。
 

@@ -19,3 +19,11 @@
 - Go race、go vet、JavaScript 语法检查通过；Linux amd64 / arm64 交叉编译通过。
 - 浏览器验证登录、导入、监听创建、换绑和管理服务重启恢复；390px 布局验证无页面横向溢出，表格可独立横向滚动，退出入口可见。
 - [ ] 在 Linux/NAS 上实际执行 Docker 镜像构建、容器首次启动及 Supervisor 生命周期验收。本机没有 Docker；不能把交叉编译或本地内核测试视为容器验收。
+
+
+## GHCR 分发
+
+- [x] 移除用户侧内核路径配置；镜像内自动通过 PATH 使用内置 Mihomo。
+- [x] 普通 Compose 使用现成 GHCR 镜像，本地构建独立为覆盖文件。
+- [x] GitHub Actions：现有测试、容器启动检查、amd64/arm64 构建和 GHCR 发布。
+- [ ] 推送 GitHub 后验收 Actions 实际运行、GHCR 首次发布及匿名拉取；本地没有 Docker，实际发布与拉取结果以 GitHub Actions 为准。
