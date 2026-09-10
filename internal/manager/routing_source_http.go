@@ -64,7 +64,7 @@ func (s *Server) routingSourceRoutes(mux *http.ServeMux) {
 		}
 		id := r.PathValue("id")
 		if state.ActiveRoutingSource == id {
-			problem(w, 400, errors.New("请先切换到其他方案，再删除此订阅"))
+			problem(w, 400, errors.New("请先停用或切换方案，再删除此订阅"))
 			return
 		}
 		tx, err := m.Store.db.BeginTx(r.Context(), nil)
@@ -90,14 +90,18 @@ func (s *Server) routingSourceRoutes(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("PUT /api/categories", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Scope string       `json:"scope"`
-			Edit  CategoryEdit `json:"edit"`
+			Scope    string         `json:"scope"`
+			Edit     CategoryEdit   `json:"edit"`
+			Rules    []CategoryRule `json:"rules"`
+			Selected string         `json:"selected"`
 		}
 		if err := readJSON(w, r, &req); err != nil {
 			problem(w, 400, err)
 			return
 		}
-		s.change(w, r, func() error { return s.Manager.Store.SaveCategoryEdit(r.Context(), req.Scope, req.Edit) })
+		s.change(w, r, func() error {
+			return s.Manager.Store.SaveCategoryConfig(r.Context(), req.Scope, req.Edit, req.Rules, req.Selected)
+		})
 	})
 	mux.HandleFunc("POST /api/categories/restore", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {

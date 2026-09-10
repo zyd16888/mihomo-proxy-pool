@@ -49,6 +49,10 @@ func (s *Store) loadRoutingScope(ctx context.Context, state *State) error {
 	state.CategoryEdits = []CategoryEdit{}
 	state.CategoryRules = []CategoryRule{}
 	state.BlockedRules = map[string]string{}
+	if state.ActiveRoutingSource == "" {
+		state.Selections = map[string]string{}
+		return nil
+	}
 	for _, table := range []string{"category_edits", "category_rules"} {
 		rows, err := s.db.QueryContext(ctx, `SELECT data FROM `+table+` WHERE scope=? ORDER BY rowid`, state.ActiveRoutingSource)
 		if err != nil {
@@ -99,13 +103,7 @@ func (s *Store) loadRoutingScope(ctx context.Context, state *State) error {
 		return err
 	}
 	state.Selections = map[string]string{}
-	query := `SELECT name,member FROM proxy_selections`
-	args := []any{}
-	if state.ActiveRoutingSource != "" {
-		query = `SELECT name,member FROM routing_source_selections WHERE scope=?`
-		args = append(args, state.ActiveRoutingSource)
-	}
-	rows, err = s.db.QueryContext(ctx, query, args...)
+	rows, err = s.db.QueryContext(ctx, `SELECT name,member FROM routing_source_selections WHERE scope=?`, state.ActiveRoutingSource)
 	if err != nil {
 		return err
 	}
@@ -164,12 +162,25 @@ func (s *Store) sourceStatus(ctx context.Context, id string, version int, messag
 }
 
 func (s *Store) SaveCategoryEdit(ctx context.Context, scope string, edit CategoryEdit) error {
+	return s.SaveCategoryConfig(ctx, scope, edit, nil, "")
+}
+
+// SaveCategoryConfig validates the complete category before committing any part.
+func (s *Store) SaveCategoryConfig(ctx context.Context, scope string, edit CategoryEdit, rules []CategoryRule, selected string) error {
+	creating := edit.Name == ""
+	if len(rules) > 500 {
+		return errors.New("首次添加最多 500 条规则")
+	}
+	if len(rules) > 0 && !creating {
+		return errors.New("已有分类请在匹配规则中编辑条目")
+	}
+
 	state, err := s.Snapshot(ctx)
 	if err != nil {
 		return err
 	}
-	if scope != state.ActiveRoutingSource {
-		return errors.New("当前方案已切换，请刷新后重试")
+	if scope == "" || scope != state.ActiveRoutingSource {
+		return errors.New("请先启用订阅方案；如已切换方案，请刷新后重试")
 	}
 	if edit.Deleted {
 		for _, old := range state.CategoryEdits {
@@ -198,7 +209,7 @@ func (s *Store) SaveCategoryEdit(ctx context.Context, scope string, edit Categor
 		return errors.New("不支持的分组类型")
 	}
 	if !edit.Deleted {
-		if edit.Kind == "" && !allowedCategoryMember(state, edit.Name) {
+		if edit.Kind == "" && !sourceHasCategory(state, edit.Name) {
 			return errors.New("新增分组需要指定选择方式")
 		}
 		for _, member := range edit.Members {
@@ -210,8 +221,34 @@ func (s *Store) SaveCategoryEdit(ctx context.Context, scope string, edit Categor
 	state.CategoryEdits = replaceCategoryEdit(state.CategoryEdits, edit)
 	state.Routing.Enabled = true
 	state.Listeners = []Listener{{Mode: ListenerModeRule, Enabled: true}}
-	if _, err := compileRouting(state); err != nil {
+	for i := range rules {
+		rules[i].ID = newID()
+		rules[i].Policy = edit.Name
+		rules[i].Enabled = true
+		rules[i].ReplacesText = ""
+		if err := normalizeCategoryRule(&rules[i]); err != nil {
+			return err
+		}
+	}
+	state.CategoryRules = append(state.CategoryRules, rules...)
+	plan, err := compileRouting(state)
+	if err != nil {
 		return err
+	}
+	if selected != "" {
+		valid := false
+		for _, g := range plan.Groups {
+			if stringOf(g["name"]) == edit.Name && stringOf(g["type"]) == "select" {
+				for _, member := range stringsOf(g["proxies"]) {
+					if member == selected {
+						valid = true
+					}
+				}
+			}
+		}
+		if !valid {
+			return errors.New("默认出口必须是此手动分类的可用候选成员")
+		}
 	}
 	raw, err := json.Marshal(edit)
 	if err != nil {
@@ -219,6 +256,21 @@ func (s *Store) SaveCategoryEdit(ctx context.Context, scope string, edit Categor
 	}
 	return s.mutate(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `INSERT INTO category_edits(scope,name,data) VALUES(?,?,?) ON CONFLICT(scope,name) DO UPDATE SET data=excluded.data`, scope, edit.Name, string(raw))
+		if err != nil {
+			return err
+		}
+		for _, rule := range rules {
+			data, err := json.Marshal(rule)
+			if err != nil {
+				return err
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO category_rules(scope,id,data) VALUES(?,?,?)`, scope, rule.ID, string(data)); err != nil {
+				return err
+			}
+		}
+		if selected != "" {
+			_, err = tx.ExecContext(ctx, `INSERT INTO routing_source_selections(scope,name,member) VALUES(?,?,?) ON CONFLICT(scope,name) DO UPDATE SET member=excluded.member`, scope, edit.Name, selected)
+		}
 		return err
 	})
 }
@@ -239,8 +291,8 @@ func (s *Store) RestoreCategory(ctx context.Context, scope, name string) error {
 	if err != nil {
 		return err
 	}
-	if state.ActiveRoutingSource != scope {
-		return errors.New("当前方案已切换，请刷新后重试")
+	if scope == "" || state.ActiveRoutingSource != scope {
+		return errors.New("请先启用订阅方案；如已切换方案，请刷新后重试")
 	}
 	for _, edit := range state.CategoryEdits {
 		if edit.Name == name && edit.Deleted {
@@ -260,6 +312,9 @@ func (s *Store) RestoreCategory(ctx context.Context, scope, name string) error {
 			})
 		}
 	}
+	if !sourceHasCategory(state, name) {
+		return errors.New("本地新增分类没有上游定义，请直接编辑分类")
+	}
 	return s.mutate(ctx, func(tx *sql.Tx) error {
 		return changed(tx.ExecContext(ctx, `DELETE FROM category_edits WHERE scope=? AND name=?`, scope, name))
 	})
@@ -273,8 +328,8 @@ func (s *Store) SaveCategoryRule(ctx context.Context, scope string, rule Categor
 	if err != nil {
 		return err
 	}
-	if scope != state.ActiveRoutingSource {
-		return errors.New("当前方案已切换，请刷新后重试")
+	if scope == "" || scope != state.ActiveRoutingSource {
+		return errors.New("请先启用订阅方案；如已切换方案，请刷新后重试")
 	}
 	known := false
 	for _, policy := range policyOptions(state) {
@@ -324,8 +379,8 @@ func (s *Store) DeleteCategoryRule(ctx context.Context, scope, id string) error 
 	if err != nil {
 		return err
 	}
-	if state.ActiveRoutingSource != scope {
-		return errors.New("当前方案已切换，请刷新后重试")
+	if scope == "" || state.ActiveRoutingSource != scope {
+		return errors.New("请先启用订阅方案；如已切换方案，请刷新后重试")
 	}
 	return s.mutate(ctx, func(tx *sql.Tx) error {
 		return changed(tx.ExecContext(ctx, `DELETE FROM category_rules WHERE scope=? AND id=?`, scope, id))
@@ -337,8 +392,8 @@ func (s *Store) BlockRoutingRule(ctx context.Context, scope, id, text string, bl
 	if err != nil {
 		return err
 	}
-	if scope != state.ActiveRoutingSource {
-		return errors.New("当前方案已切换，请刷新后重试")
+	if scope == "" || scope != state.ActiveRoutingSource {
+		return errors.New("请先启用订阅方案；如已切换方案，请刷新后重试")
 	}
 	if block {
 		valid := false
@@ -360,4 +415,15 @@ func (s *Store) BlockRoutingRule(ctx context.Context, scope, id, text string, bl
 		_, err := tx.ExecContext(ctx, `INSERT INTO routing_blocked_rules(scope,id,rule) VALUES(?,?,?) ON CONFLICT(scope,id) DO UPDATE SET rule=excluded.rule`, scope, id, text)
 		return err
 	})
+}
+
+func sourceHasCategory(state State, name string) bool {
+	if source := state.activeRoutingSource(); source != nil {
+		for _, group := range source.Document.Groups {
+			if stringOf(group["name"]) == name {
+				return true
+			}
+		}
+	}
+	return false
 }

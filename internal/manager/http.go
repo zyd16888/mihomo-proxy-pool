@@ -151,20 +151,9 @@ func (s *Server) Handler(assets http.Handler) http.Handler {
 	mux.HandleFunc("DELETE /api/connections/{id}", func(w http.ResponseWriter, r *http.Request) {
 		s.closeConnections(w, r, r.PathValue("id"))
 	})
-	mux.HandleFunc("POST /api/proxy-groups", s.saveProxyGroup)
-	mux.HandleFunc("PUT /api/proxy-groups/{id}", s.saveProxyGroup)
-	mux.HandleFunc("DELETE /api/proxy-groups/{id}", func(w http.ResponseWriter, r *http.Request) {
-		s.change(w, r, func() error { return s.Manager.Store.DeleteProxyGroup(r.Context(), r.PathValue("id")) })
-	})
 	mux.HandleFunc("PUT /api/proxy-selection", s.selectGroup)
-	mux.HandleFunc("POST /api/rule-templates", s.addTemplates)
 	mux.HandleFunc("GET /api/routing", s.readRouting)
 	mux.HandleFunc("PUT /api/routing", s.saveRouting)
-	mux.HandleFunc("POST /api/rule-sets", s.saveRuleSet)
-	mux.HandleFunc("PUT /api/rule-sets/{id}", s.saveRuleSet)
-	mux.HandleFunc("DELETE /api/rule-sets/{id}", func(w http.ResponseWriter, r *http.Request) {
-		s.change(w, r, func() error { return s.Manager.Store.DeleteRuleSet(r.Context(), r.PathValue("id")) })
-	})
 	mux.HandleFunc("POST /api/rule-sets/refresh", s.refreshRuleSets)
 	mux.HandleFunc("GET /api/exit-ip", s.exitProbeState)
 	mux.HandleFunc("POST /api/exit-ip/nodes", s.startNodeExitProbe)
@@ -501,12 +490,6 @@ func (s *Server) readRouting(w http.ResponseWriter, r *http.Request) {
 	if !hasRuleListener(preview) {
 		preview.Listeners = append(preview.Listeners, Listener{ID: "preview", Port: 0, Mode: ListenerModeRule, Enabled: true})
 	}
-	active := []string{}
-	for _, n := range state.Nodes {
-		if n.Enabled && n.Available {
-			active = append(active, "node-"+n.ID)
-		}
-	}
 	plan, buildErr := compileRouting(preview)
 	groups, rules, providers, reports := plan.Groups, plan.Rules, plan.Providers, plan.Reports
 	views, proxies, runtimeError := s.groupViews(r.Context(), state)
@@ -530,7 +513,6 @@ func (s *Server) readRouting(w http.ResponseWriter, r *http.Request) {
 		"proxyGroups":   views,
 		"proxies":       proxies,
 		"runtimeError":  runtimeError,
-		"templates":     RuleTemplates(),
 		"rules":         len(rules),
 		"providers":     len(providers),
 	})
@@ -543,16 +525,6 @@ func (s *Server) saveRouting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.change(w, r, func() error { return s.Manager.Store.SaveRouting(r.Context(), routing) })
-}
-
-func (s *Server) saveRuleSet(w http.ResponseWriter, r *http.Request) {
-	var set RuleSet
-	if err := readJSON(w, r, &set); err != nil {
-		problem(w, 400, err)
-		return
-	}
-	set.ID = r.PathValue("id")
-	s.change(w, r, func() error { return s.Manager.Store.SaveRuleSet(r.Context(), set) })
 }
 
 // refreshRuleSets asks the kernel to pull every enabled provider now instead

@@ -35,14 +35,6 @@ func copyMaps(values []map[string]any) []map[string]any {
 func baseRoutingPlan(state State) (RoutingPlan, error) {
 	var plan RoutingPlan
 	if state.ActiveRoutingSource == "" {
-		nodes := []string{}
-		for _, n := range state.Nodes {
-			if n.Enabled && n.Available {
-				nodes = append(nodes, "node-"+n.ID)
-			}
-		}
-		state.Selections = nil
-		plan.Groups, plan.Rules, plan.Providers, plan.DNS, plan.Reports = buildLocalRouting(state, nodes)
 		return plan, nil
 	}
 	source := state.activeRoutingSource()
@@ -73,7 +65,7 @@ func baseRoutingPlan(state State) (RoutingPlan, error) {
 }
 
 func compileRouting(state State) (RoutingPlan, error) {
-	if !state.Routing.Enabled || !hasRuleListener(state) {
+	if state.ActiveRoutingSource == "" || !state.Routing.Enabled || !hasRuleListener(state) {
 		return RoutingPlan{}, nil
 	}
 	plan, err := baseRoutingPlan(state)
@@ -445,20 +437,8 @@ func allowedCategoryMember(state State, member string) bool {
 }
 
 func effectiveRuleSets(state State, plan RoutingPlan) []RuleSet {
-	deleted := map[string]bool{}
-	for _, edit := range state.CategoryEdits {
-		if edit.Deleted {
-			deleted[edit.Name] = true
-		}
-	}
 	if state.ActiveRoutingSource == "" {
-		sets := []RuleSet{}
-		for _, set := range state.RuleSets {
-			if !deleted[set.Policy] {
-				sets = append(sets, set)
-			}
-		}
-		return sets
+		return []RuleSet{}
 	}
 	sets := []RuleSet{}
 	seen := map[string]bool{}

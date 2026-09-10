@@ -84,9 +84,6 @@ func TestRoutingSourceScopeRefreshAndLocalEdits(t *testing.T) {
 	upstream, server := newMutableSource(t, sourceFixture)
 	local := snapshot(t, m.Store)
 	nodeA := "node-" + local.Nodes[0].ID
-	nodeB := "node-" + local.Nodes[1].ID
-	_, err := m.Change(background, func() error { return m.Store.SaveSelection(background, GroupSelect, nodeB) })
-	requireOK(t, err)
 	id := addSource(t, service, server.URL)
 	requireOK(t, service.Activate(background, id))
 	res, err := m.Change(background, func() error { return m.Store.SaveSelection(background, "Services", nodeA) })
@@ -167,8 +164,8 @@ func TestRoutingSourceScopeRefreshAndLocalEdits(t *testing.T) {
 	}
 	requireOK(t, service.Activate(background, ""))
 	state = snapshot(t, m.Store)
-	if state.Selections[GroupSelect] != nodeB || len(state.CategoryRules) != 0 {
-		t.Fatal("external state contaminated local scheme")
+	if len(state.Selections) != 0 || len(state.CategoryRules) != 0 {
+		t.Fatal("deactivated scheme retained active selections")
 	}
 	requireOK(t, service.Activate(background, id))
 	state = snapshot(t, m.Store)
@@ -333,17 +330,20 @@ func TestRoutingSourceSchedulerChecksDueSource(t *testing.T) {
 }
 
 func TestDeletedLocalCategoryRestoresDefinitionAndRules(t *testing.T) {
-	m, _, _ := sourceManager(t)
-	requireOK(t, m.Store.SaveCategoryEdit(background, "", CategoryEdit{Label: "My group", Kind: "select", AllNodes: true}))
+	m, _, service := sourceManager(t)
+	_, server := newMutableSource(t, sourceFixture)
+	scope := addSource(t, service, server.URL)
+	requireOK(t, service.Activate(background, scope))
+	requireOK(t, m.Store.SaveCategoryEdit(background, scope, CategoryEdit{Label: "My group", Kind: "select", AllNodes: true}))
 	state := snapshot(t, m.Store)
 	edit := state.CategoryEdits[0]
-	requireOK(t, m.Store.SaveCategoryRule(background, "", CategoryRule{Policy: edit.Name, Kind: "DOMAIN", Value: "private.example", Enabled: true}))
-	requireOK(t, m.Store.SaveCategoryEdit(background, "", CategoryEdit{Name: edit.Name, Deleted: true}))
+	requireOK(t, m.Store.SaveCategoryRule(background, scope, CategoryRule{Policy: edit.Name, Kind: "DOMAIN", Value: "private.example", Enabled: true}))
+	requireOK(t, m.Store.SaveCategoryEdit(background, scope, CategoryEdit{Name: edit.Name, Deleted: true}))
 	state = snapshot(t, m.Store)
 	if slices.Contains(groupNames(routingPreview(state)), edit.Name) {
 		t.Fatal("deleted category still emitted")
 	}
-	requireOK(t, m.Store.RestoreCategory(background, "", edit.Name))
+	requireOK(t, m.Store.RestoreCategory(background, scope, edit.Name))
 	state = snapshot(t, m.Store)
 	if !slices.Contains(groupNames(routingPreview(state)), edit.Name) || state.CategoryEdits[0].Label != "My group" || len(state.CategoryRules) != 1 {
 		t.Fatal("restore lost the new category definition or its rules")

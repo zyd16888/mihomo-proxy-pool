@@ -27,9 +27,6 @@
 | DELETE | `/api/subscriptions/{id}` | 删除订阅及其无引用节点 |
 | GET | `/api/routing` | 分流设置、规则集、可选策略和订阅合并报告 |
 | PUT | `/api/routing` | 保存分流设置 |
-| POST | `/api/rule-sets` | 新增规则集 |
-| PUT | `/api/rule-sets/{id}` | 完整更新规则集 |
-| DELETE | `/api/rule-sets/{id}` | 删除规则集 |
 | POST | `/api/rule-sets/refresh` | 立即让内核拉取全部启用的规则集 |
 | GET | `/api/logs?since=` | 读取内核日志窗口中序号大于 `since` 的条目 |
 | POST | `/api/logs/level` | `{ "level": "debug" }`，切换采集级别并重连日志流 |
@@ -100,27 +97,9 @@
 
 ## 规则分流
 
-`GET /api/routing` 返回设置本身，以及按当前订阅计算出的合并结果。合并报告不依赖是否已存在规则监听，便于在创建监听前先确认结果。
+`GET /api/routing` 返回当前订阅方案的配置预览、分类、有效规则来源和规则数量。不依赖规则监听已创建。未启用方案时分类和规则列表为空，不生成本地默认方案。
 
-```json
-{
-  "routing": {"enabled":true,"defaultPolicy":"🌍 国外代理","mergeSubRules":true,"subRulePosition":500,
-              "allowGeoRules":false,"ruleSetProxy":"DIRECT","dnsEnabled":true,
-              "dnsDomestic":["https://223.5.5.5/dns-query"],"dnsForeign":["https://1.1.1.1/dns-query"]},
-  "ruleSets": [{"id":"…","name":"cn-domain","policy":"🎯 国内直连","behavior":"domain","format":"mrs",
-                "url":"https://…/cn.mrs","interval":86400,"noResolve":false,"enabled":true,
-                "position":700,"builtin":true}],
-  "policies": ["🌍 国外代理","🎯 国内直连","🛑 广告拦截","🚀 节点选择","🐟 漏网之鱼","DIRECT","REJECT"],
-  "reports": [{"subscription":"机场 A","groups":4,"rules":5,"providers":1,
-               "renamed":["🚀 节点选择 → [机场 A] 🚀 节点选择"],
-               "droppedGeo":1,"droppedRules":2,"droppedGroups":1}],
-  "groups": 10, "rules": 21, "providers": 7
-}
-```
-
-`reports` 说明每个订阅贡献了什么、丢弃了什么：`droppedGeo` 是被过滤的 GEOIP / GEOSITE 规则，`droppedRules` 是语法无法解析或指向未知策略的规则，`droppedGroups` 是解析后没有任何可用成员的策略组，`renamed` 是与内置组或其他订阅重名后被改名的策略组。
-
-规则集写入与其他配置变更一致，返回 `saved` / `apply` 包装并增加配置版本。`name` 只允许字母、数字、下划线、点和连字符，因为它同时作为磁盘缓存文件名；`mrs` 格式不支持 `classical`；`interval` 范围为 60 秒到 30 天。
+`PUT /api/routing` 接收 enabled、allowGeoRules、dnsEnabled、dnsDomestic、dnsForeign。旧本地字段 defaultPolicy/mergeSubRules/subRulePosition/ruleSetProxy 只保留数据库兼容值，不再编辑或参与分流。规则顺序、兜底及来源定义由订阅控制；HTTP 规则来源使用 DIRECT 下载。
 
 `POST /api/rule-sets/refresh` 不修改任何配置，也不增加版本；配置尚未成功应用时返回 409。返回 `{"refreshed":6,"failed":[]}`，`failed` 列出拉取失败的规则集名称。
 
@@ -166,38 +145,22 @@
 监听探测走该监听端口本身。对规则监听来说，得到的是**查询服务域名按当前规则实际使用的出口**；`ip9.com.cn` 是国内域名，命中国内直连时显示的就是直连地址。要确认代理节点的出口，请探测节点。
 
 
-## 代理组与分类模板
+## 分类出口
 
-以下写接口均要求现有登录会话和同源校验，返回 `saved` / `apply`，保存后增加配置版本并应用；应用失败时持久化意图仍保留为待应用。
+`PUT /api/proxy-selection` 请求 `{"name":"分类内部标识","member":"node-节点ID"}`。支持该分类实际包含的节点、分类名、DIRECT、REJECT，仅手动分类可选。选择通过配置应用流程生效，按当前活动方案持久化，重载、重启与失败回滚恢复对应配置的选择。
 
-| 方法与路径 | 请求 / 行为 |
-| --- | --- |
-| `POST /api/proxy-groups` | `{"name":"工作服务","kind":"select","nodeIds":[]}` |
-| `PUT /api/proxy-groups/{id}` | 同上；名称不可修改，kind 可为 `select`、`url-test`、`fallback` |
-| `DELETE /api/proxy-groups/{id}` | 规则集或兜底仍引用时返回 400 |
-| `PUT /api/proxy-selection` | `{"name":"工作服务","member":"node-节点ID"}`；也支持该组实际包含的组名、DIRECT、REJECT；仅手动组可选 |
-| `POST /api/rule-templates` | `{"ids":["category-ai-!cn","youtube"]}`；一次事务创建分类组及关联规则，冲突时整批不写入 |
+`GET /api/routing` 包含：
 
-`nodeIds: []` 表示跟随全部已启用、可用节点；非空数组表示显式成员，顺序用于故障转移。自动组没有可用成员时输出 REJECT。手动组始终可选默认节点组、直连与拦截。
-
-`GET /api/state` 增加 `proxyGroups: [{id,name,kind,nodeIds}]` 和 `selections: {组名: 成员名}`。
-
-`GET /api/routing` 保留原字段，并增加：
-
-- `policies`：动态包含基础组、自建组和当前可用的订阅组；兜底不能指向自身“漏网之鱼”。
-- `proxyGroups`：`[{name,kind,members,selected,now,chain,live,warning,customId,ruleSets}]`。成员中的 `node-<id>` 对应 state 节点；`selected` 是保存选择，`now/chain` 是已应用内核的实际出口，仅 `live:true` 时可信。没有活动规则监听、版本未应用或内核不可达时显示配置预览；失效选择保留并给出 warning。
-- `proxies`：内核代理类型、当前选择和延迟历史，不含代理配置及凭据。前端可在没有管理端检测结果时使用节点历史。
+- `policies`：DIRECT/REJECT 及当前方案的分类。
+- `proxyGroups`：分类视图，包含 name/label/kind/members/configuredMembers/allNodes/selected/now/chain/live/warning/ruleSets/ruleCount/edited。selected 是保存选择，now/chain 仅在 live 为 true 时表示实际出口。
+- `proxies`：内核出口类型、当前选择和延迟历史，不含节点配置及凭据。
 - `runtimeError`：无法读取实际出口时的提示。
-- `templates`：`[{id,name,description,sets}]`，每个 set 含地址、行为、格式、顺序及默认代理组。可选 id 包括 category-ai-!cn、youtube、netflix、telegram、google、microsoft、apple、steam。
 
-规则集策略在保存时根据当前配置校验。订阅组随后消失时，规则构建将失效目标降级为 REJECT，避免整个配置失败或意外直连；管理页面显示出口失效。默认排序 300，IP 模板为 310；若人为调整过原规则优先级，需要再次核对首次命中的顺序。
-
-选择变更通过完整配置应用事务生效，不直接暴露内核控制接口；内部出口探测组不能通过上述接口切换。选择写入生成配置的首个成员，重载与失败回滚均恢复对应配置的选择，`last-good.yaml` 可独立恢复上一版成功选择。
-
+旧本地代理组、独立规则集写入和内置分类模板接口已移除；分类统一使用 `/api/categories`，来源定义通过订阅更新。
 
 ## 外部方案订阅和分类规则
 
-所有接口沿用登录会话与同源校验。方案的唯一标识为 `id`；本地方案使用空字符串 `scope`。每个 scope 分别保存选择、分类覆盖、自定义条目及来源规则屏蔽记录。`GET /api/state` 增加 `routingSources`、`activeRoutingSource`、`categoryEdits`、`categoryRules`、`blockedRules`。快照正文不出现在状态响应中。
+所有接口沿用登录会话与同源校验。方案的唯一标识为 `id`；分类写入的 `scope` 必须是当前启用的非空方案 ID。空活动方案表示未配置，不是本地方案。每个 scope 分别保存选择、分类覆盖、自定义条目及来源规则屏蔽记录。`GET /api/state` 增加 `routingSources`、`activeRoutingSource`、`categoryEdits`、`categoryRules`、`blockedRules`。快照正文不出现在状态响应中。
 
 ### 方案生命周期
 
@@ -210,7 +173,7 @@
 新建省略 id/version。响应包含 `errors`、`unresolved`、`mappings`、`ignored`、`groupNames`、`source` 和 `changed`。只有解析、绑定及校验成功才返回 `token`。失败以结构化预览返回，不写配置；单文档最大 32 MiB，最多 512 个分组。`sourceIds` 是本地节点订阅 ID，空数组表示全部来源；其中空字符串表示手动导入来源。
 
 - `POST /api/routing-sources`：`{"token":"预览令牌"}`，保存刚刚预览的候选，令牌 10 分钟有效且一次性消费；源版本或配置版本变化后拒绝，避免提交陈旧预览。返回 `saved/changed`，新方案先保存为未启用。
-- `POST /api/routing-sources/activate`：`{"id":"方案ID"}`，空 id 切回本地；验证与应用成功后才持久化切换，失败保留之前方案。
+- `POST /api/routing-sources/activate`：`{"id":"方案ID"}`，空 id 停用方案并关闭规则监听端口；验证与应用成功后才持久化切换，失败保留之前方案。
 - `POST /api/routing-sources/{id}/refresh`：立即检查并更新，返回 `changed`。同源检查去重，失败记录 source.lastError，保留成功快照；未变内容不增加配置版本或重载。
 - `DELETE /api/routing-sources/{id}`：仅删除非活动方案，清理该 scope 的选择与覆盖；不变更其他配置的版本。
 
@@ -220,18 +183,18 @@
 
 | 接口 | 请求与行为 |
 | --- | --- |
-| `PUT /api/categories` | `{"scope":"","edit":{"name":"原始组标识","label":"显示名","kind":"select","members":["node-ID","DIRECT"],"allNodes":true,"deleted":false}}` |
-| `POST /api/categories/restore` | `{"scope":"","name":"组标识"}`；已删除组恢复删除前设置，未删除组撤销本地分组设置 |
+| `PUT /api/categories` | `{"scope":"方案ID","edit":{"name":"原始组标识","label":"显示名","kind":"select","members":["node-ID","DIRECT"],"allNodes":true,"deleted":false}}` |
+| `POST /api/categories/restore` | `{"scope":"方案ID","name":"组标识"}`；已删除组恢复删除前设置，未删除组撤销本地分组设置 |
 | `GET /api/routing-entries?policy=…&q=…&offset=0` | 当前方案的规则条目，每页最多 100 条，返回 entries/total/offset/scope；policy 留空查询全部 |
-| `POST /api/category-rules` | `{"scope":"","rule":{"policy":"组标识","kind":"DOMAIN-SUFFIX","value":"example.com","position":100,"enabled":true}}` |
+| `POST /api/category-rules` | `{"scope":"方案ID","rule":{"policy":"组标识","kind":"DOMAIN-SUFFIX","value":"example.com","position":100,"enabled":true}}` |
 | `PUT /api/category-rules/{id}` | 更新本地条目，未知 id 不创建新记录 |
 | `DELETE /api/category-rules/{id}?scope=…` | 删除本地补充条目 |
-| `POST /api/routing-entries/block` | `{"scope":"","id":"来源条目ID","text":"原始规则","block":true}`；false 恢复来源条目 |
+| `POST /api/routing-entries/block` | `{"scope":"方案ID","id":"来源条目ID","text":"原始规则","block":true}`；false 恢复来源条目 |
 
-新建分类省略 name，服务端生成稳定引用。编辑已有分类时 kind 为空表示只修改显示名称，沿用原有成员和方式。kind 支持 select/url-test/fallback/load-balance；members 可包含当前方案的组、关联节点、DIRECT/REJECT。整组删除使用 deleted:true，保留可恢复定义，规则和引用在生成阶段移除。
+新建分类省略 name，服务端生成稳定引用。可同时提交 `rules:[{"kind":"DOMAIN-SUFFIX","value":"example.com","position":100}]` 和 `selected:"node-ID"`，完整校验后在同一事务写入分类、首批规则和默认出口。首批规则最多 500 条；已有分类的条目使用条目接口编辑。selected 必须是手动分类的有效候选。编辑订阅自带分类时 kind 为空表示只修改显示名称，沿用上游成员和方式；本地新增分类必须保留明确 kind，不能恢复到不存在的上游定义。kind 支持 select/url-test/fallback/load-balance；members 可包含当前方案的组、关联节点、DIRECT/REJECT。整组删除使用 deleted:true，保留可恢复定义，规则和引用在生成阶段移除。
 
 条目 kind 支持 DOMAIN、DOMAIN-SUFFIX、IP（也接受 IP-CIDR/IP-CIDR6），服务端规范化地址和 CIDR。编辑来源域名/IP 时，新条目携带 `replacesText`，同一数据库事务中写入补充规则并屏蔽原规则；未知的原规则不能被替换。来源条目的 id 按原规则文本摘要生成，顺序变化不会使屏蔽失效。
 
-scope 与当前活动方案不一致时拒绝写入。分类及条目写接口返回既有 saved/apply，保存不代表应用成功；前端必须检查 apply.applied。选择接口 `PUT /api/proxy-selection` 自动使用当前方案的独立选择表。
+scope 为空或与当前活动方案不一致时拒绝写入。分类及条目写接口返回既有 saved/apply，保存不代表应用成功；前端必须检查 apply.applied。选择接口 `PUT /api/proxy-selection` 自动使用当前方案的独立选择表。
 
-`GET /api/routing` 增加 sources/activeSource/categoryEdits/finalPolicy，proxyGroups 增加 label/edited/ruleCount/allNodes/configuredMembers；ruleSets 返回当前方案的有效规则集入口。`POST /api/rule-sets/refresh` 仅更新当前生效配置的 HTTP 规则提供者，inline 提供者不发起网络更新。
+`GET /api/routing` 增加 sources/activeSource/categoryEdits/finalPolicy，proxyGroups 增加 label/edited/fromSource/ruleCount/allNodes/configuredMembers；ruleSets 返回当前方案的有效规则集入口。`POST /api/rule-sets/refresh` 仅更新当前生效配置的 HTTP 规则提供者，inline 提供者不发起网络更新。

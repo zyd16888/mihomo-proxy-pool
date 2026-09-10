@@ -7,17 +7,15 @@ let entriesSerial=0;
 
 function sourceLabel(source){try{const u=new URL(source.url);return u.host+u.pathname+(u.search?'?…':'');}catch{return '分流订阅';}}
 function renderRoutingSources(){
-  const local=!state.activeRoutingSource,term=$('search').value.trim().toLowerCase();
+  const term=$('search').value.trim().toLowerCase();
   const sources=(state.routingSources||[]).filter(s=>[s.name,sourceLabel(s)].some(v=>v.toLowerCase().includes(term)));
-  const localMatch=!term||'本地方案'.includes(term);
-  $('row-count').textContent=`${sources.length+(localMatch?1:0)} / ${(state.routingSources?.length||0)+1}`;
-  const localCard=`<article class="source-card${local?' current':''}"><div><strong>本地方案</strong><p>原有分类、手工规则和节点选择</p></div><div class="actions">${local?tag('使用中','ready'):'<button type="button" data-activate-source="">切换至本地方案</button>'}</div></article>`;
-  const cards=(localMatch?localCard:'')+sources.map(source=>{
+  $('row-count').textContent=`${sources.length} / ${state.routingSources?.length||0}`;
+  const cards=sources.map(source=>{
     const current=state.activeRoutingSource===source.id;
-    return `<article class="source-card${current?' current':''}"><div class="source-card-copy"><strong>${escapeHTML(source.name)} ${current?tag('使用中','ready'):''}</strong><p>${escapeHTML(sourceLabel(source))}</p><small>${source.groups} 个分组 · ${source.rules} 条规则 · ${source.providers} 个规则集 · ${source.autoUpdate?`每 ${Math.round(source.interval/3600*100)/100} 小时检查`:'手动更新'}</small><small>检查：${escapeHTML(formatTime(source.checkedAt))} · 内容更新：${escapeHTML(formatTime(source.updatedAt))}</small>${source.lastError?`<p class="error-text">${escapeHTML(source.lastError)} · 保留上次成功内容</p>`:''}</div><div class="actions"><button type="button" data-edit-source="${source.id}">编辑</button><button type="button" data-refresh-source="${source.id}">立即更新</button>${current?'':`<button type="button" data-activate-source="${source.id}">启用</button><button type="button" class="remove" data-delete-source="${source.id}">删除</button>`}</div></article>`;
+    return `<article class="source-card${current?' current':''}"><div class="source-card-copy"><strong>${escapeHTML(source.name)} ${current?tag('使用中','ready'):''}</strong><p>${escapeHTML(sourceLabel(source))}</p><small>${source.groups} 个分组 · ${source.rules} 条规则 · ${source.providers} 个规则集 · ${source.autoUpdate?`每 ${Math.round(source.interval/3600*100)/100} 小时检查`:'手动更新'}</small><small>检查：${escapeHTML(formatTime(source.checkedAt))} · 内容更新：${escapeHTML(formatTime(source.updatedAt))}</small>${source.lastError?`<p class="error-text">${escapeHTML(source.lastError)} · 保留上次成功内容</p>`:''}</div><div class="actions"><button type="button" data-edit-source="${source.id}">编辑</button><button type="button" data-refresh-source="${source.id}">立即更新</button>${current?'<button type="button" data-activate-source="">停用</button>':`<button type="button" data-activate-source="${source.id}">启用</button><button type="button" class="remove" data-delete-source="${source.id}">删除</button>`}</div></article>`;
   }).join('');
   const deleted=(state.categoryEdits||[]).filter(edit=>edit.deleted);
-  return `<div class="source-workspace"><p class="routing-caption">保存多套分流方案，每次启用一套。分类的本地修改、删除记录和节点选择分别保留。</p>${cards}${deleted.length?`<details class="advanced"><summary>已删除的分类 (${deleted.length})</summary>${deleted.map(edit=>`<div class="deleted-category"><span>${escapeHTML(edit.label||edit.name)}</span><button type="button" data-restore-category="${escapeHTML(edit.name)}">恢复分类</button></div>`).join('')}</details>`:''}</div>`;
+  return `<div class="source-workspace"><p class="routing-caption">保存多套分流方案，每次启用一套。分类的本地修改、删除记录和节点选择分别保留。</p>${cards||'<div class="empty"><strong>尚未订阅分流方案</strong><p>添加 Mihomo YAML 订阅，预览校验后启用。</p></div>'}${deleted.length?`<details class="advanced"><summary>已删除的分类 (${deleted.length})</summary>${deleted.map(edit=>`<div class="deleted-category"><span>${escapeHTML(edit.label||edit.name)}</span><button type="button" data-restore-category="${escapeHTML(edit.name)}">恢复分类</button></div>`).join('')}</details>`:''}</div>`;
 }
 function openRoutingSource(id=''){
   const source=state.routingSources?.find(s=>s.id===id);
@@ -39,29 +37,40 @@ function renderSourcePreview(report){
   sourcePreviewToken=report.token||'';
 }
 function openCategoryEditor(name=''){
+  if(!state.activeRoutingSource){openRoutingSource();return;}
   const group=routingView.proxyGroups?.find(g=>g.name===name);const edit=state.categoryEdits?.find(e=>e.name===name);
   categoryEditScope=state.activeRoutingSource||'';$('group-form').reset();$('group-id').value=name;
-  $('group-title').textContent=group?'编辑规则组':'新增规则组';$('group-name').value=group?.label||'';$('group-name').readOnly=false;
+  $('group-title').textContent=group?'编辑分流分类':'新增分流分类';$('group-name').value=group?.label||'';$('group-name').readOnly=false;
   $('group-kind').value=group?.kind||'select';$('group-all').checked=group?!!group.allNodes:true;
   editingGroupMembers=[...(group?.configuredMembers||group?.members||[])];
-  $('group-inherit-label').hidden=!group;$('group-inherit').checked=!!group&&(!edit||!edit.kind);
+  $('group-inherit-label').hidden=!group?.fromSource;$('group-inherit').checked=!!group?.fromSource&&(!edit||!edit.kind);
+  $('group-initial-rules').hidden=!!group;$('group-default').dataset.saved=group?.selected||'';
   renderCategoryEditor();openDialog('group-dialog');
 }
 function renderCategoryEditor(){
   const inherit=$('group-inherit').checked,all=$('group-all').checked;
   $('group-kind').disabled=inherit;$('group-all').disabled=inherit;$('group-member-field').hidden=inherit;
   const term=$('group-node-search').value.trim().toLowerCase(),name=$('group-id').value;
-  let candidates=[{value:'DIRECT',name:'直连',source:'内置出口'},{value:'REJECT',name:'拦截',source:'内置出口'},...(routingView.proxyGroups||[]).filter(g=>g.name!==name).map(g=>({value:g.name,name:g.label||g.name,source:'代理组'}))];
+  let candidates=[{value:'DIRECT',name:'直连',source:'连接方式'},{value:'REJECT',name:'拦截',source:'连接方式'},...(routingView.proxyGroups||[]).filter(g=>g.name!==name).map(g=>({value:g.name,name:g.label||g.name,source:'分流分类'}))];
   if(!all)candidates.push(...state.nodes.map(n=>({value:'node-'+n.id,name:n.name,source:nodeSource(n)})));
   candidates=candidates.filter(c=>[c.name,c.source].some(v=>v.toLowerCase().includes(term)));
   $('group-members').innerHTML=candidates.map(c=>`<label class="group-node-option"><input type="checkbox" data-group-node="${escapeHTML(c.value)}"${editingGroupMembers.includes(c.value)?' checked':''}><span>${escapeHTML(c.name)}<small>${escapeHTML(c.source)}</small></span>${c.value.startsWith('node-')?delayCell(c.value.slice(5)):''}</label>`).join('');
   const members=editingGroupMembers.filter(m=>!all||!m.startsWith('node-'));
   $('group-order').innerHTML=members.map(value=>{const index=editingGroupMembers.indexOf(value);return `<div class="group-order-row"><span>${escapeHTML(outboundName(value))}</span><button type="button" data-group-move="${escapeHTML(value)}" data-direction="-1"${index===0?' disabled':''} aria-label="上移 ${escapeHTML(outboundName(value))}">↑</button><button type="button" data-group-move="${escapeHTML(value)}" data-direction="1"${index===editingGroupMembers.length-1?' disabled':''} aria-label="下移 ${escapeHTML(outboundName(value))}">↓</button><button type="button" data-group-remove="${escapeHTML(value)}" aria-label="移除 ${escapeHTML(outboundName(value))}">×</button></div>`;}).join('')+(all?'<p class="field-hint">已启用节点会自动追加为候选出口。</p>':'');
+  const previous=$('group-default').value||$('group-default').dataset.saved;
+  let defaults=inherit?(routingView.proxyGroups?.find(g=>g.name===name)?.members||[]):members;
+  if(all&&!inherit){const source=state.routingSources?.find(s=>s.id===state.activeRoutingSource);defaults=[...defaults,...state.nodes.filter(n=>n.enabled&&n.available&&(!source?.sourceIds?.length||source.sourceIds.includes(n.sourceId))).map(n=>'node-'+n.id)];}
+  $('group-default-field').hidden=$('group-kind').value!=='select';
+  $('group-default').innerHTML='<option value="">使用首个可用候选出口</option>'+[...new Set(defaults)].map(value=>`<option value="${escapeHTML(value)}">${escapeHTML(outboundName(value))}</option>`).join('');
+  $('group-default').value=defaults.includes(previous)?previous:'';
+
 }
 function saveCategoryEditor(event){
   event.preventDefault();const inherit=$('group-inherit').checked;
   const edit={name:$('group-id').value,label:$('group-name').value,kind:inherit?'':$('group-kind').value,members:inherit?[]:editingGroupMembers.filter(m=>!$('group-all').checked||!m.startsWith('node-')),allNodes:!inherit&&$('group-all').checked,deleted:false};
-  run(()=>save('/api/categories','PUT',{scope:categoryEditScope,edit},'规则组已保存，订阅更新会保留本地设置',$('group-dialog')),$('group-dialog'));
+  const rules=edit.name?[]:[...$('group-domains').value.split(/\r?\n/).map(value=>({kind:'DOMAIN-SUFFIX',value})),...$('group-ips').value.split(/\r?\n/).map(value=>({kind:'IP',value}))].filter(r=>r.value.trim()).map((r,i)=>({...r,position:100+i}));
+  const selected=$('group-kind').value==='select'?$('group-default').value:'';
+  run(()=>save('/api/categories','PUT',{scope:categoryEditScope,edit,rules,selected},'规则组已保存，订阅更新会保留本地设置',$('group-dialog')),$('group-dialog'));
 }
 async function refreshCategoryEntries(){
   const serial=++entriesSerial,scope=entriesView.scope;
@@ -96,6 +105,9 @@ async function sourceAction(task,message){
   await run(async()=>{try{const result=await task();await load();if(result?.apply&&!result.apply.applied)throw new Error("已保存，尚未生效："+(result.apply.error||"请重新应用"));notice(message);}catch(error){await load();throw error;}});
 }
 function initRoutingSourcesUI(){
+  $('rule-sources-content').addEventListener('click',event=>{const button=event.target.closest('[data-action="category-rules"]');if(button&&!busy){$('rule-sources-dialog').close();openCategoryEntries(button.dataset.id);}});
+  $('refresh-rule-sources').addEventListener('click',()=>run(async()=>{const result=await api('/api/rule-sets/refresh','POST',{});notice(result.failed?.length?`已更新 ${result.refreshed} 个规则来源，${result.failed.join('、')} 更新失败`:`已更新 ${result.refreshed} 个规则来源`,!!result.failed?.length);},$('rule-sources-dialog')));
+
   $('source-form').addEventListener('input',()=>{sourcePreviewToken='';$('source-save').disabled=true;});
   $('source-preview').addEventListener('change',event=>{const name=event.target.dataset.sourceBinding;if(name){sourceBindings[name]=event.target.value;sourcePreviewToken='';$('source-save').disabled=true;}});
   $('source-preview-button').addEventListener('click',async()=>{
@@ -142,8 +154,10 @@ function initRoutingSourcesUI(){
 
 function routingPageTools(){
  const settings='<button type="button" class="quiet" data-action="routing-settings">分流设置</button>';
- if(routingTab==='sources')return settings;
- const entries='<button type="button" class="quiet" data-action="all-routing-entries">全部规则条目</button>';
- if(routingTab==='rules')return (state.activeRoutingSource?'':'<button type="button" class="quiet" data-action="new-ruleset">添加远程规则集</button>')+entries+'<button type="button" class="quiet" data-action="refresh-rulesets">更新列表内容</button>';
- return '<button type="button" class="quiet" data-action="new-group">新增规则组</button>'+entries+settings;
+ if(routingTab==='sources'||!state.activeRoutingSource)return settings;
+ return '<button type="button" class="quiet" data-action="all-routing-entries">全部规则</button><button type="button" class="quiet" data-action="rule-sources">高级 · 规则来源</button>'+settings;
+}
+function openRuleSources(){
+ $('rule-sources-content').innerHTML=renderRuleSets(state.ruleSets||[]);
+ openDialog('rule-sources-dialog');
 }

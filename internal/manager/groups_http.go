@@ -25,6 +25,7 @@ func (r *Runtime) Proxies(ctx context.Context) (map[string]CoreProxy, error) {
 }
 
 type ProxyGroupView struct {
+	FromSource        bool     `json:"fromSource"`
 	AllNodes          bool     `json:"allNodes"`
 	ConfiguredMembers []string `json:"configuredMembers"`
 	Label             string   `json:"label"`
@@ -52,7 +53,6 @@ func (s *Server) groupViews(ctx context.Context, state State) ([]ProxyGroupView,
 	for _, rule := range plan.Rules {
 		counts[rulePolicy(rule)]++
 	}
-	policies := policyOptions(state)
 	core := map[string]CoreProxy{}
 	runtimeError := ""
 	live := state.Routing.Enabled && hasRuleListener(state) && state.Revision == state.AppliedRevision && state.LastError == ""
@@ -82,6 +82,7 @@ func (s *Server) groupViews(ctx context.Context, state State) ([]ProxyGroupView,
 		if source := state.activeRoutingSource(); source != nil {
 			for _, raw := range source.Document.Groups {
 				if stringOf(raw["name"]) == name {
+					v.FromSource = true
 					v.AllNodes = truthy(raw["include-all"]) || truthy(raw["include-all-proxies"])
 					v.ConfiguredMembers = stringsOf(raw["proxies"])
 				}
@@ -99,9 +100,7 @@ func (s *Server) groupViews(ctx context.Context, state State) ([]ProxyGroupView,
 				}
 			}
 		}
-		if state.ActiveRoutingSource == "" && name == GroupFinal && !slices.Contains(policies, state.Routing.DefaultPolicy) {
-			v.Warning = "兜底策略已不存在，当前拦截流量，请重新设置"
-		}
+
 		if v.Selected != "" && !slices.Contains(members, v.Selected) {
 			v.Warning = "原选择已不在分组中，当前使用默认出口，请重新选择"
 		}
@@ -131,16 +130,6 @@ func (s *Server) groupViews(ctx context.Context, state State) ([]ProxyGroupView,
 	return views, core, runtimeError
 }
 
-func (s *Server) saveProxyGroup(w http.ResponseWriter, r *http.Request) {
-	var group ProxyGroup
-	if err := readJSON(w, r, &group); err != nil {
-		problem(w, 400, err)
-		return
-	}
-	group.ID = r.PathValue("id")
-	s.change(w, r, func() error { return s.Manager.Store.SaveProxyGroup(r.Context(), group) })
-}
-
 func (s *Server) selectGroup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name   string `json:"name"`
@@ -151,15 +140,4 @@ func (s *Server) selectGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.change(w, r, func() error { return s.Manager.Store.SaveSelection(r.Context(), req.Name, req.Member) })
-}
-
-func (s *Server) addTemplates(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		IDs []string `json:"ids"`
-	}
-	if err := readJSON(w, r, &req); err != nil {
-		problem(w, 400, err)
-		return
-	}
-	s.change(w, r, func() error { return s.Manager.Store.AddRuleTemplates(r.Context(), req.IDs) })
 }

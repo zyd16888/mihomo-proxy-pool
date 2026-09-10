@@ -148,7 +148,7 @@ func TestConnectionsResolveGeneratedIdentifiersToNames(t *testing.T) {
 	conn.Metadata.DestinationPort = "443"
 	conn.Metadata.InboundName = "listener-" + listener.ID
 	conn.Metadata.InboundPort = "17891"
-	conn.Chains = []string{"node-" + node.ID, GroupSelect}
+	conn.Chains = []string{"node-" + node.ID, "Selection"}
 	conn.Rule = "RuleSet"
 	conn.RulePayload = "cn"
 	conn.Start = time.Now().Add(-30 * time.Second)
@@ -167,7 +167,7 @@ func TestConnectionsResolveGeneratedIdentifiersToNames(t *testing.T) {
 	if got.Listener != "采集线路 A" || got.ListenerID != listener.ID {
 		t.Fatalf("listener not resolved: %+v", got)
 	}
-	if len(got.Chains) != 2 || got.Chains[0] != GroupSelect || got.Chains[1] != "HK 01" {
+	if len(got.Chains) != 2 || got.Chains[0] != "Selection" || got.Chains[1] != "HK 01" {
 		t.Fatalf("chain not resolved inbound-first: %v", got.Chains)
 	}
 	if got.Target != "example.com:443" {

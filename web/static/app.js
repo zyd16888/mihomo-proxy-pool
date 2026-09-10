@@ -149,6 +149,7 @@ function listenerStatus(l) {
   if (!state.coreReady) return tag('内核离线','error');
   if (state.revision!==state.appliedRevision || state.lastError) return tag('待应用','pending');
   if (!l.enabled) return tag('已停用');
+  if (l.mode==='rule'&&!state.activeRoutingSource) return tag('待配置订阅','pending');
   if (l.mode==='rule') return state.routing?.enabled?tag('已生效','ready'):tag('分流已关闭','error');
   const node=activeNode(l.nodeId);
   if (!node?.available || !node?.enabled) return tag('节点不可用','error');
@@ -279,47 +280,23 @@ function renderPageTools() {
   setHTML(tools,'');
 }
 function routingSummary() {
-  const routing=state.routing||{};
-  const view=routingView;
-  const ruleListeners=state.listeners.filter(l=>l.mode==='rule');
-  const activePorts=ruleListeners.filter(l=>l.enabled).map(l=>l.port);
-  const status=!routing.enabled?tag('已关闭','error')
-    :activePorts.length?tag('已启用','ready'):tag('无规则监听','pending');
-  const hint=!routing.enabled
-    ?'规则分流已关闭，规则监听端口不会开放。'
-    :activePorts.length
-      ?`浏览器或下载器使用 http://本机IP:${activePorts.join(' 、 ')} 即可按当前方案选择出口。`
-      :'尚未创建规则监听。到“监听管理”新增一个出口方式为“规则分流”的端口后生效。';
-  const reports=(view.reports||[]).filter(r=>r.groups||r.rules||r.providers||r.droppedGeo||r.droppedRules||r.droppedGroups||r.duplicates);
-  // Merge results are folded away: they matter when adding a subscription,
-  // not every time the page is opened.
-  const reportHTML=reports.length?reports.map(r=>{
-    const kept=[r.rules?`规则 ${r.rules}`:'',r.groups?`策略组 ${r.groups}`:'',r.providers?`规则集 ${r.providers}`:''].filter(Boolean).join(' · ')||'无可用内容';
-    const dropped=[r.droppedGeo?`GEO 规则 ${r.droppedGeo}`:'',r.droppedRules?`无法解析 ${r.droppedRules}`:'',r.droppedGroups?`空策略组 ${r.droppedGroups}`:'',r.duplicates?`重复 ${r.duplicates}`:''].filter(Boolean).join(' · ');
-    const renamed=(r.renamed||[]).length?`<div class="merge-renamed">重命名：${r.renamed.map(escapeHTML).join('、')}</div>`:'';
-    return `<div class="merge-report"><strong>${escapeHTML(r.subscription)}</strong><span>合并 ${kept}</span>${dropped?`<span class="quota-warning">丢弃 ${dropped}</span>`:''}${renamed}</div>`;
-  }).join(''):'<div class="merge-report muted">订阅没有自带规则，或未开启合并。当前只使用下方规则集。</div>';
   const scheme=state.routingSources?.find(s=>s.id===state.activeRoutingSource);
-  const figures=`<span class="routing-figures"><b>${escapeHTML(scheme?.name||'本地方案')}</b> · 策略组 <b>${view.groups||0}</b> · 规则 <b>${view.rules||0}</b> · 规则集 <b>${view.providers||0}</b> · 兜底 <b>${escapeHTML(outboundName(routingView.finalPolicy||routing.defaultPolicy))}</b> · DNS ${routing.dnsEnabled?'已配置':'未配置'}</span>`;
-  return `<section class="routing-summary">
-    <div class="routing-status">${status}<span>${escapeHTML(hint)}</span>${figures}</div>
-    <details class="routing-detail"${reports.length?'':' hidden'}>
-      <summary>订阅规则合并 (${reports.length})</summary>
-      <div class="merge-reports">${reportHTML}</div>
-    </details>
-  </section>`;
+  const ports=state.listeners.filter(l=>l.mode==='rule'&&l.enabled).map(l=>l.port);
+  const ready=!!scheme&&state.routing?.enabled;
+  const hint=!scheme?'添加并启用订阅后开始分流。':!ready?'规则分流已关闭。':ports.length?`规则监听端口：${ports.join('、')}`:'新增规则监听后开始接收流量。';
+  return `<section class="routing-summary"><div class="routing-status">${tag(scheme?scheme.name:'尚未配置',ready?'ready':'pending')}<span>${escapeHTML(hint)}</span>${scheme?`<span class="routing-figures">分类 <b>${routingView.groups||0}</b> · 规则 <b>${routingView.rules||0}</b> · 未命中时 <b>${escapeHTML(outboundName(routingView.finalPolicy))}</b></span>`:''}</div></section>`;
 }
 function renderRuleSets(items) {
   const rows=items.map(s=>`<tr${s.enabled?'':' class="is-off"'}>
     <td><span class="mono">${s.position}</span></td>
-    <td class="primary-cell"><span class="ruleset-name" title="${escapeHTML(s.url)}">${escapeHTML(s.name)}</span>${s.builtin?tag('内置'):''}</td>
+    <td class="primary-cell"><span class="ruleset-name" title="${escapeHTML(s.url)}">${escapeHTML(s.name)}</span></td>
     <td>${escapeHTML(outboundName(s.policy))}${routingView.policies?.includes(s.policy)?'':'<span class="error-text">出口已失效 · 当前拦截</span>'}</td>
     <td class="muted" title="每 ${Math.round(s.interval/3600)} 小时更新">${escapeHTML(s.behavior)} · ${escapeHTML(s.format)}${s.noResolve?' · no-resolve':''}</td>
     <td>${s.enabled?tag('启用中','ready'):tag('已停用')}</td>
-    <td><div class="actions">${state.activeRoutingSource?button('查看组内规则','category-rules',s.policy):button('编辑','edit-ruleset',s.id)+button(s.enabled?'停用':'启用','toggle-ruleset',s.id)+button('删除','delete-ruleset',s.id,'remove')}</div></td></tr>`);
+    <td><div class="actions">${button('查看匹配规则','category-rules',s.policy)}</div></td></tr>`);
   const table=items.length
     ?`<table><thead><tr>${['排序','名称','命中策略','类型','状态','操作'].map(h=>`<th scope="col">${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`
-    :state.activeRoutingSource&&!(state.ruleSets||[]).length?'<div class="empty"><strong>此方案直接包含规则条目</strong><p>点击“全部规则条目”查看和编辑域名、IP 等分流规则。</p></div>':'<div class="empty"><strong>没有匹配的规则集</strong><p>可添加远程规则集，或调整搜索条件。</p></div>';
+    :state.activeRoutingSource&&!(state.ruleSets||[]).length?'<div class="empty"><strong>此方案直接包含规则条目</strong><p>点击“全部规则条目”查看和编辑域名、IP 等分流规则。</p></div>':'<div class="empty"><strong>没有匹配的规则集</strong><p>规则来源由订阅方案提供。</p></div>';
   return table;
 }
 function renderConnections(items) {
@@ -368,13 +345,13 @@ function renderTable() {
     return `<tr><td class="primary-cell">${escapeHTML(l.name)}</td><td><span class="mono port">${l.port}</span></td><td>${outbound}</td><td>${l.mode==='rule'?'<a href="#routing">按目标分流</a>':`<span data-check-result="${l.nodeId}">${delayCell(l.nodeId)}</span>`}</td><td data-exit-listener="${l.id}">${exitCell('listeners',l.id)}</td><td>${listenerStatus(l)}</td><td><div class="actions">${button('探测出口','exit-listener',l.id)}${button('复制','copy',l.id)}${button('编辑','edit-listener',l.id)}${button(l.enabled?'停用':'启用','toggle-listener',l.id)}${button('删除','delete-listener',l.id,'remove')}</div></td></tr>`;});
   setHTML($('table'),`<table><thead><tr>${['名称','端口','出口','节点延迟','出口 IP','状态','操作'].map(h=>`<th scope="col">${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`);renderChecks();
 }
-function openDialog(id) {const d=$(id);d.querySelector('.dialog-error').textContent='';d.showModal();}
+function openDialog(id) {const d=$(id);d.querySelector('.dialog-error').textContent='';d.showModal();const body=d.querySelector('.dialog-body');if(body)body.scrollTop=0;}
 function syncListenerMode() {
   const rule=$('listener-mode').value==='rule';
   $('listener-node-field').hidden=rule;
   $('listener-node').required=!rule;
   $('listener-mode-hint').textContent=rule
-    ?'该端口按域名和 IP 规则选择出口，适合浏览器和下载器。需要先在“规则分流”中保持启用。'
+    ?'该端口按域名和 IP 规则选择出口，适合浏览器和下载器。需要先在“规则分流”中启用订阅方案；未配置时暂不开放端口。'
     :'该端口始终走同一个节点，出口 IP 稳定，适合爬虫和过盾。';
 }
 function editListener(id='') {
@@ -386,33 +363,10 @@ function editListener(id='') {
   $('listener-node-search').value='';$('listener-node-success').checked=false;renderListenerPicker();
   $('listener-enabled').checked=l?.enabled??true;syncListenerMode();openDialog('listener-dialog');
 }
-function editRuleSet(id='') {
-  const s=(state.ruleSets||[]).find(item=>item.id===id);$('ruleset-form').reset();$('ruleset-id').value=id;
-  $('ruleset-title').textContent=s?'编辑规则集':'新增规则集';
-  const policies=routingView.policies?.length?routingView.policies:['🌍 国外代理','🎯 国内直连','🛑 广告拦截','DIRECT','REJECT'];
-  $('ruleset-policy').innerHTML=policies.map(p=>`<option value="${escapeHTML(p)}">${escapeHTML(outboundName(p))}</option>`).join('');
-  $('ruleset-name').value=s?.name||'';$('ruleset-url').value=s?.url||'';
-  $('ruleset-policy').value=s?.policy||policies[0];
-  $('ruleset-behavior').value=s?.behavior||'domain';$('ruleset-format').value=s?.format||'mrs';
-  let position=s?.position;
-  if(position===undefined)position=300;
-  $('ruleset-position').value=position;
-  $('ruleset-interval').value=s?.interval||86400;
-  $('ruleset-noresolve').checked=s?.noResolve??false;$('ruleset-enabled').checked=s?.enabled??true;
-  openDialog('ruleset-dialog');
-}
 function openRoutingSettings() {
   const routing=state.routing||{};
-  const policies=routingView.policies?.length?routingView.policies:['🌍 国外代理','🎯 国内直连','DIRECT'];
-  $('routing-default').innerHTML=policies.filter(p=>p!=='🐟 漏网之鱼').map(p=>`<option value="${escapeHTML(p)}">${escapeHTML(outboundName(p))}</option>`).join('');
   $('routing-enabled').checked=!!routing.enabled;
-  if(state.activeRoutingSource){$('routing-default').innerHTML=`<option value="${escapeHTML(routing.defaultPolicy)}">${escapeHTML(routing.defaultPolicy)}（本地方案）</option>`;}
-  $('routing-default').value=routing.defaultPolicy||policies[0];
-  ['routing-default','routing-subpos','routing-merge','routing-setproxy'].forEach(id=>$(id).disabled=!!state.activeRoutingSource);
-  $('routing-subpos').value=routing.subRulePosition??500;
-  $('routing-merge').checked=!!routing.mergeSubRules;
   $('routing-geo').checked=!!routing.allowGeoRules;
-  $('routing-setproxy').value=routing.ruleSetProxy||'DIRECT';
   $('routing-dns').checked=!!routing.dnsEnabled;
   $('routing-dns-cn').value=(routing.dnsDomestic||[]).join('\n');
   $('routing-dns-out').value=(routing.dnsForeign||[]).join('\n');
@@ -466,7 +420,7 @@ $('apply').addEventListener('click',()=>run(async()=>{const data=await api('/api
 $('create').addEventListener('click',()=>{
   if(page==='listeners'){editListener();return;}
   if(page==='nodes'){$('import-form').reset();openDialog('import-dialog');return;}
-  if(page==='routing'){if(routingTab==='sources')openRoutingSource();else if(state.activeRoutingSource)openCategoryEditor();else openTemplates();return;}
+  if(page==='routing'){if(routingTab==='sources'||!state.activeRoutingSource)openRoutingSource();else openCategoryEditor();return;}
   if(page==='subscriptions')editSubscription();
 });
 $('search').addEventListener('input',renderTable);
@@ -474,9 +428,8 @@ $('listener-mode').addEventListener('change',syncListenerMode);
 $('page-tools').addEventListener('click',event=>{
   const target=event.target.closest('[data-action]');if(!target||busy)return;
   const {action,id}=target.dataset;
+  if(action==='rule-sources'){openRuleSources();return;}
   if(action==='all-routing-entries'){openCategoryEntries('');return;}
-  if(action==='new-group'){editProxyGroup();return;}
-  if(action==='new-ruleset'){if(state.activeRoutingSource)openCategoryEntries('');else editRuleSet();return;}
   if(action==='observe-tab'){observeTab=id;renderTable();pollObserve();return;}
   if(action==='toggle-log-pause'){logsPaused=!logsPaused;renderTable();return;}
   if(action==='clear-logs'){run(async()=>{const data=await api('/api/logs','DELETE');logWindow.length=0;logs={...logs,...data,entries:undefined};logs.nextSeq=data.nextSeq;renderTable();});return;}
@@ -502,14 +455,9 @@ $('listener-form').addEventListener('submit',e=>{e.preventDefault();const id=$('
   if(mode==='node'&&!$('listener-node').value){$('listener-dialog').querySelector('.dialog-error').textContent='请选择绑定节点';return;}
   run(()=>save('/api/listeners'+(id?'/'+id:''),id?'PUT':'POST',{name:$('listener-name').value,port:Number($('listener-port').value),mode,nodeId:mode==='rule'?'':$('listener-node').value,enabled:$('listener-enabled').checked},'监听已保存并应用',$('listener-dialog')),$('listener-dialog'));});
 $('routing-form').addEventListener('submit',e=>{e.preventDefault();
-  run(()=>save('/api/routing','PUT',{enabled:$('routing-enabled').checked,defaultPolicy:$('routing-default').value,mergeSubRules:$('routing-merge').checked,
-    subRulePosition:Number($('routing-subpos').value),allowGeoRules:$('routing-geo').checked,ruleSetProxy:$('routing-setproxy').value,
+  run(()=>save('/api/routing','PUT',{enabled:$('routing-enabled').checked,allowGeoRules:$('routing-geo').checked,
     dnsEnabled:$('routing-dns').checked,dnsDomestic:$('routing-dns-cn').value.split('\n').map(v=>v.trim()).filter(Boolean),
     dnsForeign:$('routing-dns-out').value.split('\n').map(v=>v.trim()).filter(Boolean)},'分流设置已保存并应用',$('routing-dialog')),$('routing-dialog'));});
-$('ruleset-form').addEventListener('submit',e=>{e.preventDefault();const id=$('ruleset-id').value;
-  run(()=>save('/api/rule-sets'+(id?'/'+id:''),id?'PUT':'POST',{name:$('ruleset-name').value,url:$('ruleset-url').value,policy:$('ruleset-policy').value,
-    behavior:$('ruleset-behavior').value,format:$('ruleset-format').value,position:Number($('ruleset-position').value),
-    interval:Number($('ruleset-interval').value),noResolve:$('ruleset-noresolve').checked,enabled:$('ruleset-enabled').checked},'规则集已保存并应用',$('ruleset-dialog')),$('ruleset-dialog'));});
 $('subscription-form').addEventListener('submit',e=>{e.preventDefault();const id=$('subscription-id').value;run(()=>save('/api/subscriptions'+(id?'/'+id:''),id?'PUT':'POST',{name:$('subscription-name').value,url:$('subscription-url').value},'订阅已保存，可点击“同步节点”获取节点',$('subscription-dialog')),$('subscription-dialog'));});
 $('import-form').addEventListener('submit',e=>{e.preventDefault();run(()=>save('/api/import','POST',{raw:$('import-raw').value},'节点已导入，可以创建监听了',$('import-dialog')),$('import-dialog'));});
 $('confirm-form').addEventListener('submit',e=>{e.preventDefault();run(()=>save(confirmation,'DELETE',undefined,'已删除并应用',$('confirm-dialog')),$('confirm-dialog'));});
@@ -520,8 +468,6 @@ $('table').addEventListener('click',e=>{
   if(action==='check-group'){requestCheck('/api/node-checks/batch',{ids:groupTargets(id)});return;}
   if(action==='node-details'){detailNodeId=id;openDialog('node-details');updateNodeDetails();return;}
   if(action==='edit-listener'){editListener(id);return;}if(action==='edit-subscription'){editSubscription(id);return;}
-  if(action==='edit-ruleset'){editRuleSet(id);return;}
-  if(action==='delete-ruleset'){const s=state.ruleSets.find(i=>i.id===id);confirmDelete(`删除规则集“${s.name}”？命中该规则集的流量将改由后续规则决定。`,'/api/rule-sets/'+id);return;}
   if(action==='close-connection'){run(async()=>{await api('/api/connections/'+encodeURIComponent(id),'DELETE');await pollObserve();});return;}
   if(action==='delete-listener'){const l=state.listeners.find(i=>i.id===id);confirmDelete(`删除“${l.name}”并关闭端口 ${l.port}？绑定节点会保留。`,'/api/listeners/'+id);return;}
   if(action==='delete-node'){const n=activeNode(id);confirmDelete(`删除节点“${n.name}”？如果仍有监听引用，需要先更换绑定。`,'/api/nodes/'+id);return;}
@@ -532,7 +478,6 @@ $('table').addEventListener('click',e=>{
   run(async()=>{
     if(action==='toggle-listener'){const l=state.listeners.find(i=>i.id===id);await save('/api/listeners/'+id,'PUT',{...l,enabled:!l.enabled},'监听状态已更新');}
     if(action==='toggle-node'){const n=activeNode(id);await save('/api/nodes/'+id,'PATCH',{enabled:!n.enabled},'节点状态已更新');}
-    if(action==='toggle-ruleset'){const s=state.ruleSets.find(i=>i.id===id);await save('/api/rule-sets/'+id,'PUT',{...s,enabled:!s.enabled},'规则集状态已更新');}
     if(action==='usage'){const result=await api('/api/subscriptions/'+id+'/usage','POST',{});await load();const messages={current:'订阅用量已更新',missing:'订阅未提供流量信息',invalid:'返回的流量信息格式异常',fetch_failed:'用量刷新失败'};notice(messages[result.usage?.status]||'暂无用量信息',result.usage?.status==='invalid');}
     if(action==='sync')await save('/api/subscriptions/'+id+'/sync','POST',{},'订阅节点和用量已刷新，监听绑定已保留');
     if(action==='copy'){const l=state.listeners.find(i=>i.id===id);const address=`http://${location.hostname}:${l.port}`;if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(address);notice('代理地址已复制：'+address);}else{notice('代理地址：'+address+'（可选中复制）');}}

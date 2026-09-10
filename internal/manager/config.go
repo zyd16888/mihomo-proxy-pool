@@ -81,7 +81,7 @@ func BuildConfig(state State, coreAddr, secret string) ([]byte, []int, error) {
 	}
 	// A rule listener carries no proxy field, which is what sends its traffic
 	// through the rule engine instead of a single pinned outbound.
-	ruleReady := state.Routing.Enabled
+	ruleReady := state.Routing.Enabled && state.ActiveRoutingSource != ""
 	for _, l := range state.Listeners {
 		if !l.Enabled {
 			continue
@@ -204,7 +204,8 @@ func atomicWrite(path string, raw []byte) error {
 }
 
 // Bootstrap always starts the last acknowledged configuration, including after an
-// interruption between candidate reload and database acknowledgement.
+// interruption between candidate reload and database acknowledgement. Legacy local
+// routing is retired before startup when no subscription is active.
 func (m *Manager) Bootstrap(ctx context.Context) error {
 	good := filepath.Join(m.Dir, "last-good.yaml")
 	raw, err := os.ReadFile(good)
@@ -221,6 +222,43 @@ func (m *Manager) Bootstrap(ctx context.Context) error {
 	if cfg == nil {
 		return errors.New("上一版运行配置为空")
 	}
+	state, err := m.Store.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	retired := false
+	if state.ActiveRoutingSource == "" {
+		// Keep acknowledged fixed listeners and their node definitions intact.
+		listeners, _ := cfg["listeners"].([]any)
+		kept := []any{}
+		for _, item := range listeners {
+			listener, ok := item.(map[string]any)
+			if ok && stringOf(listener["proxy"]) == "" {
+				retired = true
+				continue
+			}
+			kept = append(kept, item)
+		}
+		if retired {
+			cfg["listeners"] = kept
+			groups := []any{}
+			if existing, ok := cfg["proxy-groups"].([]any); ok {
+				for _, item := range existing {
+					if group, ok := item.(map[string]any); ok && stringOf(group["name"]) == ExitProbeGroup {
+						groups = append(groups, item)
+					}
+				}
+			}
+			cfg["proxy-groups"] = groups
+			cfg["rules"] = []string{"MATCH,REJECT"}
+			delete(cfg, "rule-providers")
+			delete(cfg, "dns")
+			raw, err = yaml.Marshal(cfg)
+			if err != nil {
+				return err
+			}
+		}
+	}
 	for _, p := range portsFromConfig(raw) {
 		for _, reserved := range m.ReservedPorts {
 			if p == reserved {
@@ -233,6 +271,12 @@ func (m *Manager) Bootstrap(ctx context.Context) error {
 	raw, err = yaml.Marshal(cfg)
 	if err != nil {
 		return err
+	}
+	if retired {
+		// A later failed reload must not restore the obsolete local scheme either.
+		if err := atomicWrite(good, raw); err != nil {
+			return err
+		}
 	}
 	return atomicWrite(filepath.Join(m.Dir, "config.yaml"), raw)
 }

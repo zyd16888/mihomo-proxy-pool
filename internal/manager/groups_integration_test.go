@@ -92,9 +92,6 @@ func TestRealKernelGroupRoutingAndRestart(t *testing.T) {
 		_, port, _ := net.SplitHostPort(strings.TrimPrefix(p.URL, "http://"))
 		requireOK(t, store.Import(background, "", parsed(t, nodeJSON([]string{"A", "B"}[i], port))))
 	}
-	for _, set := range snapshot(t, store).RuleSets {
-		requireOK(t, store.DeleteRuleSet(background, set.ID))
-	}
 	routing := snapshot(t, store).Routing
 	routing.DNSEnabled = false
 	requireOK(t, store.SaveRouting(background, routing))
@@ -102,10 +99,22 @@ func TestRealKernelGroupRoutingAndRestart(t *testing.T) {
 		fmt.Fprintf(w, "payload:\n  - '%s.demo.test'\n", strings.TrimPrefix(r.URL.Path, "/"))
 	}))
 	defer provider.Close()
-	for _, name := range []string{"ai", "video"} {
-		requireOK(t, store.SaveProxyGroup(background, ProxyGroup{Name: name, Kind: "select"}))
-		requireOK(t, store.SaveRuleSet(background, RuleSet{Name: name, Policy: name, Behavior: "domain", Format: "yaml", URL: provider.URL + "/" + name, Interval: 86400, Enabled: true, Position: 300}))
-	}
+	service := NewRoutingSourceService(m)
+	defer service.Close()
+	initialYAML := fmt.Sprintf(`proxy-groups:
+ - {name: ai, type: select, include-all: true}
+ - {name: video, type: select, include-all: true}
+rule-providers:
+ ai: {type: http, behavior: domain, format: yaml, url: %s/ai, interval: 86400}
+ video: {type: http, behavior: domain, format: yaml, url: %s/video, interval: 86400}
+rules:
+ - RULE-SET,ai,ai
+ - RULE-SET,video,video
+ - MATCH,REJECT
+`, provider.URL, provider.URL)
+	_, initialServer := newMutableSource(t, initialYAML)
+	initialID := addSource(t, service, initialServer.URL)
+	requireOK(t, service.Activate(background, initialID))
 	state := snapshot(t, store)
 	requireOK(t, store.SaveSelection(background, "ai", "node-"+state.Nodes[0].ID))
 	requireOK(t, store.SaveSelection(background, "video", "node-"+state.Nodes[1].ID))
@@ -172,8 +181,6 @@ rules:
 `, portA, portB)
 	external := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, externalYAML) }))
 	defer external.Close()
-	service := NewRoutingSourceService(m)
-	defer service.Close()
 	sourceID := addSource(t, service, external.URL)
 	requireOK(t, service.Activate(background, sourceID))
 	assertRoute("ai", "via-A")
@@ -200,6 +207,10 @@ rules:
 		t.Fatal("deleted external group returned after restart")
 	}
 	requireOK(t, service.Activate(background, ""))
+	if _, err := client.Get("http://ai.demo.test/fixture"); err == nil {
+		t.Fatal("deactivated rule listener still accepts traffic")
+	}
+	requireOK(t, service.Activate(background, initialID))
 	assertRoute("ai", "via-B")
 	assertRoute("video", "via-B")
 	requireOK(t, service.Activate(background, sourceID))

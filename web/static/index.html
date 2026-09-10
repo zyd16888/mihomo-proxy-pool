@@ -79,52 +79,27 @@
     <div class="dialog-heading"><div><h2 id="routing-title">分流设置</h2></div><button type="button" data-close class="close" aria-label="关闭">×</button></div>
     <label class="checkbox"><input id="routing-enabled" type="checkbox">启用规则分流</label>
     <p class="field-hint">关闭后规则监听不再开放端口。存在启用中的规则监听时无法关闭。</p>
-    <label for="routing-default">兜底策略</label><select id="routing-default"></select>
-    <p class="field-hint">所有规则都未命中时的出口，对应策略组“漏网之鱼”。</p>
-    <details class="advanced"><summary>高级设置 · 订阅合并与 DNS</summary><label for="routing-subpos">订阅规则插入位置</label><input id="routing-subpos" type="number" min="0" max="100000" step="10">
-    <p class="field-hint">与规则集的排序值比较：数值越小越先匹配。默认 500，即位于广告拦截之后、国内外规则集之前。</p>
-    <label class="checkbox"><input id="routing-merge" type="checkbox">合并订阅自带的规则和策略组</label>
+    <details class="advanced"><summary>高级设置 · GEO 与 DNS</summary>
     <label class="checkbox"><input id="routing-geo" type="checkbox">允许订阅中的 GEOIP / GEOSITE 规则</label>
     <p class="field-hint">允许后内核需要下载 GeoIP 与 GeoSite 数据库，首次应用会明显变慢，离线环境可能失败。</p>
-    <label for="routing-setproxy">规则集下载出口</label><select id="routing-setproxy"><option value="DIRECT">DIRECT · 直连下载</option><option value="🚀 节点选择">节点选择 · 通过代理下载</option></select>
-    <p class="field-hint">规则集下载本身也走规则引擎。选择代理时，节点不可用会导致规则集始终拉取失败。</p>
     <label class="checkbox"><input id="routing-dns" type="checkbox">生成配套 DNS 配置</label>
     <label for="routing-dns-cn">国内 DNS</label><textarea id="routing-dns-cn" rows="2" spellcheck="false" placeholder="每行一个"></textarea>
     <label for="routing-dns-out">国外 DNS</label><textarea id="routing-dns-out" rows="2" spellcheck="false" placeholder="每行一个"></textarea>
     <p class="field-hint">国外 DNS 用于出境规则集匹配到的域名，其余查询使用国内 DNS。</p></details>
     <p class="dialog-error error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close class="quiet">取消</button><button type="submit" class="primary">保存并应用</button></div>
   </form></dialog>
-  <dialog id="ruleset-dialog" aria-labelledby="ruleset-title"><form id="ruleset-form">
-    <div class="dialog-heading"><div><h2 id="ruleset-title">新增规则集</h2></div><button type="button" data-close class="close" aria-label="关闭">×</button></div>
-    <input type="hidden" id="ruleset-id">
-    <label for="ruleset-name">名称</label><input id="ruleset-name" required maxlength="64" placeholder="例如：streaming"><p class="field-hint">规则集标识可使用字母、数字、下划线、点和连字符。</p>
-    <label for="ruleset-url">规则集地址</label><input id="ruleset-url" type="url" required placeholder="https://…" autocomplete="off">
-    <label for="ruleset-policy">命中后使用的代理组</label><select id="ruleset-policy"></select>
-    <details class="advanced"><summary>高级设置</summary><label for="ruleset-behavior">匹配内容</label><select id="ruleset-behavior"><option value="domain">domain · 域名列表</option><option value="ipcidr">ipcidr · IP 段列表</option><option value="classical">classical · 完整规则行</option></select>
-    <label for="ruleset-format">文件格式</label><select id="ruleset-format"><option value="mrs">mrs · 二进制，体积最小</option><option value="yaml">yaml · payload 列表</option><option value="text">text · 纯文本每行一条</option></select>
-    <p class="field-hint">mrs 不支持 classical。格式必须与地址返回的内容一致，否则规则数会异常。</p>
-    <label for="ruleset-position">排序值</label><input id="ruleset-position" type="number" min="0" max="100000" step="10"><p class="field-hint">数值越小越先匹配。</p>
-    <label for="ruleset-interval">更新间隔（秒）</label><input id="ruleset-interval" type="number" min="60" max="2592000" step="60">
-    <label class="checkbox"><input id="ruleset-noresolve" type="checkbox">no-resolve（仅 ipcidr 有效，避免为匹配 IP 规则而解析域名）</label>
-    </details><label class="checkbox"><input id="ruleset-enabled" type="checkbox" checked>启用</label>
-    <p class="dialog-error error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close class="quiet">取消</button><button type="submit" class="primary">保存并应用</button></div>
-  </form></dialog>
   <dialog id="confirm-dialog" aria-labelledby="confirm-title"><form id="confirm-form"><h2 id="confirm-title">确认删除</h2><p id="confirm-description"></p><p class="dialog-error error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close class="quiet">取消</button><button type="submit" class="danger">确认删除</button></div></form></dialog>
   <dialog id="group-dialog" aria-labelledby="group-title"><form id="group-form">
- <div class="dialog-heading"><h2 id="group-title">新增代理组</h2><button type="button" data-close class="close" aria-label="关闭">×</button></div>
- <input id="group-id" type="hidden"><label for="group-name">分组名称</label><input id="group-name" required maxlength="64" placeholder="例如：工作服务">
+ <div class="dialog-heading"><h2 id="group-title">新增分流分类</h2><button type="button" data-close class="close" aria-label="关闭">×</button></div>
+ <input id="group-id" type="hidden"><label for="group-name">分类名称</label><input id="group-name" required maxlength="64" placeholder="例如：工作服务">
  <label class="checkbox" id="group-inherit-label"><input id="group-inherit" type="checkbox">保持原方案的选择方式与成员，只修改名称</label>
  <label for="group-kind">出口选择方式</label><select id="group-kind"><option value="select">手动选择 · 自己指定节点</option><option value="url-test">自动选择 · 优先低延迟节点</option><option value="fallback">故障转移 · 按成员顺序选择可用节点</option><option value="load-balance">负载均衡 · 分散连接</option></select>
  <label class="checkbox"><input id="group-all" type="checkbox" checked>使用全部已启用节点，跟随关联订阅更新</label>
  <div id="group-member-field"><label for="group-node-search">选择成员</label><input id="group-node-search" type="search" placeholder="搜索节点…"><div id="group-members" class="node-picker"></div><label>成员顺序</label><div id="group-order"></div></div>
+ <div id="group-default-field"><label for="group-default">默认出口</label><select id="group-default"></select></div>
+ <div id="group-initial-rules"><label for="group-domains">匹配域名（每行一个，包含子域名）</label><textarea id="group-domains" rows="3" placeholder="example.com"></textarea><label for="group-ips">匹配 IP / 网段（每行一个）</label><textarea id="group-ips" rows="3" placeholder="203.0.113.7&#10;2001:db8::/32"></textarea><p class="field-hint">保存后命中这些地址的流量走本分类出口。本地补充规则优先于订阅规则，后续可在“匹配规则”中编辑。</p></div>
  <p class="field-hint">自动选择与故障转移每 5 分钟检查一次。没有可用成员时阻止连接；手动组也可选择默认代理、直连或拦截。</p>
  <p class="dialog-error error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close class="quiet">取消</button><button type="submit" class="primary">保存并应用</button></div>
- </form></dialog>
- <dialog id="template-dialog" aria-labelledby="template-title"><form id="template-form">
- <div class="dialog-heading"><h2 id="template-title">添加规则分类</h2><button type="button" data-close class="close" aria-label="关闭">×</button></div>
- <p class="muted">勾选需要的分类，自动添加规则集和代理组，然后为每组选择节点。</p><div id="template-list" class="template-list"></div>
- <p class="field-hint">来源 MetaCubeX/meta-rules-dat，每天更新。新分类默认排序 300，位于默认广告拦截之后、订阅及通用国内外规则之前。已有分组或规则集不会覆盖。</p>
- <p class="dialog-error error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close class="quiet">取消</button><button type="submit" class="primary">添加并应用</button></div>
  </form></dialog>
 
  <dialog id="source-dialog" aria-labelledby="source-title"><form id="source-form">
@@ -154,4 +129,5 @@
  <label class="checkbox"><input id="category-rule-enabled" type="checkbox" checked>启用此规则</label>
  <p class="dialog-error error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close class="quiet">取消</button><button type="submit" class="primary">保存并应用</button></div>
  </form></dialog>
+<dialog id="rule-sources-dialog" aria-labelledby="rule-sources-title"><div class="dialog-heading"><h2 id="rule-sources-title">规则来源 · 高级管理</h2><button type="button" data-close class="close" aria-label="关闭">×</button></div><p class="field-hint">来源由当前订阅定义，内容按订阅设置更新。可到所属分类补充域名/IP，或停用对应的来源规则。</p><div id="rule-sources-content"></div><p class="dialog-error error-text" role="alert"></p><div class="dialog-actions"><button id="refresh-rule-sources" type="button">立即更新来源内容</button><button type="button" data-close>关闭</button></div></dialog>
 </body></html>

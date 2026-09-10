@@ -130,28 +130,16 @@ func (s *Store) migrateListeners() error {
 // who removes a default set does not get it back on the next restart.
 func (s *Store) seedRouting() error {
 	defaults := DefaultRouting()
-	result, err := s.db.Exec(`INSERT OR IGNORE INTO routing(id,enabled,default_policy,merge_sub_rules,sub_rule_position,allow_geo_rules,rule_set_proxy,dns_enabled,dns_domestic,dns_foreign)
-		VALUES(1,1,?,1,?,0,?,1,?,?)`,
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO routing(id,enabled,default_policy,merge_sub_rules,sub_rule_position,allow_geo_rules,rule_set_proxy,dns_enabled,dns_domestic,dns_foreign)
+		VALUES(1,1,?,0,?,0,?,1,?,?)`,
 		defaults.DefaultPolicy, defaults.SubRulePosition, defaults.RuleSetProxy,
 		strings.Join(defaults.DNSDomestic, "\n"), strings.Join(defaults.DNSForeign, "\n"))
 	if err != nil {
 		return err
 	}
-	created, err := result.RowsAffected()
-	if err != nil || created == 0 {
-		return err
-	}
-	for _, set := range DefaultRuleSets() {
-		if set.Interval == 0 {
-			set.Interval = 86400
-		}
-		if _, err := s.db.Exec(`INSERT INTO rule_sets(id,name,policy,behavior,format,url,interval,no_resolve,enabled,position,builtin)
-			VALUES(?,?,?,?,?,?,?,?,1,?,1)`,
-			newID(), set.Name, set.Policy, set.Behavior, set.Format, set.URL, set.Interval, set.NoResolve, set.Position); err != nil {
-			return err
-		}
-	}
-	return nil
+	// Retire only explicitly marked legacy defaults; user data stays archived.
+	_, err = s.db.Exec(`DELETE FROM rule_sets WHERE builtin=1`)
+	return err
 }
 
 func (s *Store) Close() error { return s.db.Close() }
