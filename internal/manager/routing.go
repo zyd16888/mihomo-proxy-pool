@@ -525,7 +525,7 @@ func convertRule(rule string, routing Routing, groupRename, providerRename map[s
 // BuildRouting produces the proxy groups, rules, rule providers and DNS block
 // for rule listeners. It returns nothing when routing is off or no rule
 // listener is enabled, so an unused feature never downloads a rule set.
-func BuildRouting(state State, activeNodes []string) (groups []map[string]any, rules []string, providers map[string]map[string]any, dns map[string]any, reports []MergeReport) {
+func buildLocalRouting(state State, activeNodes []string) (groups []map[string]any, rules []string, providers map[string]map[string]any, dns map[string]any, reports []MergeReport) {
 	if !state.Routing.Enabled || !hasRuleListener(state) {
 		return nil, nil, nil, nil, nil
 	}

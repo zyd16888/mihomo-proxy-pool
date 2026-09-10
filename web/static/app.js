@@ -39,7 +39,7 @@ async function api(path, method='GET', body) {
 }
 function notice(message,error=false) {$('notice').hidden=false;$('notice').textContent=message;$('notice').className=`notice${error?' error':''}`;}
 function showLogin() {$('workspace').hidden=true;$('login').hidden=false;document.querySelectorAll('dialog[open]').forEach(d=>d.close());}
-function showWorkspace() {$('login').hidden=true;$('workspace').hidden=false;}
+function showWorkspace() {$('login').hidden=true;$('workspace').hidden=false;$('notice').hidden=true;}
 function acceptChecks(data, serial) {if(serial>=appliedCheckSerial){checks=data||{results:{},batch:null};appliedCheckSerial=serial;}}
 async function load() {
   const serial=++checkSerial;state=await api('/api/state');acceptChecks(state.checks,serial);
@@ -160,7 +160,7 @@ function render() {
   $('page-title').textContent=current.title;
   $('create').textContent=current.create;$('create').hidden=!current.create;
   $('search').placeholder=current.search;
-  const counts={listeners:state.listeners.length,nodes:state.nodes.length,subscriptions:state.subscriptions.length,routing:(state.ruleSets||[]).filter(s=>s.enabled).length,observe:connections.connections.length};
+  const counts={listeners:state.listeners.length,nodes:state.nodes.length,subscriptions:state.subscriptions.length,routing:routingView.proxyGroups?.length??(state.ruleSets||[]).filter(s=>s.enabled).length,observe:connections.connections.length};
   for (const name of Object.keys(pages)) $('nav-'+name).textContent=counts[name];
   document.querySelectorAll('[data-page]').forEach(a=>{const selected=a.dataset.page===page;a.classList.toggle('active',selected);if(selected)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});
   $('core-dot').className='live-dot'+(state.coreReady?' ready':'');$('core-label').textContent=state.coreReady?`Mihomo ${state.coreVersion}`:'内核未连接';
@@ -266,7 +266,7 @@ function renderPageTools() {
     return;
   }
   if(page==='routing'){
-    setHTML(tools,`<button type="button" class="quiet" data-action="new-group">新增代理组</button><button type="button" class="quiet" data-action="new-ruleset">自定义规则</button><button type="button" class="quiet" data-action="routing-settings">分流设置</button><button type="button" class="quiet" data-action="refresh-rulesets">立即更新规则集</button>`);
+    setHTML(tools,routingPageTools());
     return;
   }
   if(page==='nodes'){
@@ -288,7 +288,7 @@ function routingSummary() {
   const hint=!routing.enabled
     ?'规则分流已关闭，规则监听端口不会开放。'
     :activePorts.length
-      ?`浏览器或下载器使用 http://本机IP:${activePorts.join(' 、 ')} 即可获得国内直连、国外代理和广告拦截。`
+      ?`浏览器或下载器使用 http://本机IP:${activePorts.join(' 、 ')} 即可按当前方案选择出口。`
       :'尚未创建规则监听。到“监听管理”新增一个出口方式为“规则分流”的端口后生效。';
   const reports=(view.reports||[]).filter(r=>r.groups||r.rules||r.providers||r.droppedGeo||r.droppedRules||r.droppedGroups||r.duplicates);
   // Merge results are folded away: they matter when adding a subscription,
@@ -299,7 +299,8 @@ function routingSummary() {
     const renamed=(r.renamed||[]).length?`<div class="merge-renamed">重命名：${r.renamed.map(escapeHTML).join('、')}</div>`:'';
     return `<div class="merge-report"><strong>${escapeHTML(r.subscription)}</strong><span>合并 ${kept}</span>${dropped?`<span class="quota-warning">丢弃 ${dropped}</span>`:''}${renamed}</div>`;
   }).join(''):'<div class="merge-report muted">订阅没有自带规则，或未开启合并。当前只使用下方规则集。</div>';
-  const figures=`<span class="routing-figures">策略组 <b>${view.groups||0}</b> · 规则 <b>${view.rules||0}</b> · 规则集 <b>${view.providers||0}</b> · 兜底 <b>${escapeHTML(routing.defaultPolicy||'—')}</b> · DNS ${routing.dnsEnabled?'已配置':'未配置'}</span>`;
+  const scheme=state.routingSources?.find(s=>s.id===state.activeRoutingSource);
+  const figures=`<span class="routing-figures"><b>${escapeHTML(scheme?.name||'本地方案')}</b> · 策略组 <b>${view.groups||0}</b> · 规则 <b>${view.rules||0}</b> · 规则集 <b>${view.providers||0}</b> · 兜底 <b>${escapeHTML(outboundName(routingView.finalPolicy||routing.defaultPolicy))}</b> · DNS ${routing.dnsEnabled?'已配置':'未配置'}</span>`;
   return `<section class="routing-summary">
     <div class="routing-status">${status}<span>${escapeHTML(hint)}</span>${figures}</div>
     <details class="routing-detail"${reports.length?'':' hidden'}>
@@ -312,13 +313,13 @@ function renderRuleSets(items) {
   const rows=items.map(s=>`<tr${s.enabled?'':' class="is-off"'}>
     <td><span class="mono">${s.position}</span></td>
     <td class="primary-cell"><span class="ruleset-name" title="${escapeHTML(s.url)}">${escapeHTML(s.name)}</span>${s.builtin?tag('内置'):''}</td>
-    <td>${escapeHTML(s.policy)}${routingView.policies?.includes(s.policy)?'':'<span class="error-text">出口已失效 · 当前拦截</span>'}</td>
+    <td>${escapeHTML(outboundName(s.policy))}${routingView.policies?.includes(s.policy)?'':'<span class="error-text">出口已失效 · 当前拦截</span>'}</td>
     <td class="muted" title="每 ${Math.round(s.interval/3600)} 小时更新">${escapeHTML(s.behavior)} · ${escapeHTML(s.format)}${s.noResolve?' · no-resolve':''}</td>
     <td>${s.enabled?tag('启用中','ready'):tag('已停用')}</td>
-    <td><div class="actions">${button('编辑','edit-ruleset',s.id)}${button(s.enabled?'停用':'启用','toggle-ruleset',s.id)}${button('删除','delete-ruleset',s.id,'remove')}</div></td></tr>`);
+    <td><div class="actions">${state.activeRoutingSource?button('查看组内规则','category-rules',s.policy):button('编辑','edit-ruleset',s.id)+button(s.enabled?'停用':'启用','toggle-ruleset',s.id)+button('删除','delete-ruleset',s.id,'remove')}</div></td></tr>`);
   const table=items.length
     ?`<table><thead><tr>${['排序','名称','命中策略','类型','状态','操作'].map(h=>`<th scope="col">${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`
-    :'<div class="empty"><strong>没有规则集</strong><p>新增一个规则集，或恢复默认的国内、国外与广告列表。</p></div>';
+    :state.activeRoutingSource&&!(state.ruleSets||[]).length?'<div class="empty"><strong>此方案直接包含规则条目</strong><p>点击“全部规则条目”查看和编辑域名、IP 等分流规则。</p></div>':'<div class="empty"><strong>没有匹配的规则集</strong><p>可添加远程规则集，或调整搜索条件。</p></div>';
   return table;
 }
 function renderConnections(items) {
@@ -405,7 +406,9 @@ function openRoutingSettings() {
   const policies=routingView.policies?.length?routingView.policies:['🌍 国外代理','🎯 国内直连','DIRECT'];
   $('routing-default').innerHTML=policies.filter(p=>p!=='🐟 漏网之鱼').map(p=>`<option value="${escapeHTML(p)}">${escapeHTML(outboundName(p))}</option>`).join('');
   $('routing-enabled').checked=!!routing.enabled;
+  if(state.activeRoutingSource){$('routing-default').innerHTML=`<option value="${escapeHTML(routing.defaultPolicy)}">${escapeHTML(routing.defaultPolicy)}（本地方案）</option>`;}
   $('routing-default').value=routing.defaultPolicy||policies[0];
+  ['routing-default','routing-subpos','routing-merge','routing-setproxy'].forEach(id=>$(id).disabled=!!state.activeRoutingSource);
   $('routing-subpos').value=routing.subRulePosition??500;
   $('routing-merge').checked=!!routing.mergeSubRules;
   $('routing-geo').checked=!!routing.allowGeoRules;
@@ -420,7 +423,7 @@ async function run(task,dialog) {
   if(busy)return;busy=true;document.querySelectorAll('button').forEach(b=>b.disabled=true);
   if(dialog)dialog.querySelector('.dialog-error').textContent='';
   try {await task();} catch(error) {if(page==='subscriptions'||page==='nodes'){try{await load();}catch{}}if(dialog?.open)dialog.querySelector('.dialog-error').textContent=error.message;notice(error.message,true);}
-  finally {busy=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);renderTable();}
+  finally {busy=false;document.querySelectorAll('button').forEach(b=>b.disabled=false);renderTable();if($('category-entries-dialog')?.open)renderCategoryEntries();if($('source-dialog')?.open)$('source-save').disabled=!sourcePreviewToken;}
 }
 async function save(path,method,body,message,dialog) {const data=await api(path,method,body);dialog?.close();await load();notice(data.apply?.applied?message:`已保存，尚未生效：${data.apply?.error||'请重新应用配置'}`,!data.apply?.applied);}
 function confirmDelete(description,path) {confirmation=path;$('confirm-description').textContent=description;openDialog('confirm-dialog');}
@@ -463,7 +466,7 @@ $('apply').addEventListener('click',()=>run(async()=>{const data=await api('/api
 $('create').addEventListener('click',()=>{
   if(page==='listeners'){editListener();return;}
   if(page==='nodes'){$('import-form').reset();openDialog('import-dialog');return;}
-  if(page==='routing'){openTemplates();return;}
+  if(page==='routing'){if(routingTab==='sources')openRoutingSource();else if(state.activeRoutingSource)openCategoryEditor();else openTemplates();return;}
   if(page==='subscriptions')editSubscription();
 });
 $('search').addEventListener('input',renderTable);
@@ -471,8 +474,9 @@ $('listener-mode').addEventListener('change',syncListenerMode);
 $('page-tools').addEventListener('click',event=>{
   const target=event.target.closest('[data-action]');if(!target||busy)return;
   const {action,id}=target.dataset;
+  if(action==='all-routing-entries'){openCategoryEntries('');return;}
   if(action==='new-group'){editProxyGroup();return;}
-  if(action==='new-ruleset'){editRuleSet();return;}
+  if(action==='new-ruleset'){if(state.activeRoutingSource)openCategoryEntries('');else editRuleSet();return;}
   if(action==='observe-tab'){observeTab=id;renderTable();pollObserve();return;}
   if(action==='toggle-log-pause'){logsPaused=!logsPaused;renderTable();return;}
   if(action==='clear-logs'){run(async()=>{const data=await api('/api/logs','DELETE');logWindow.length=0;logs={...logs,...data,entries:undefined};logs.nextSeq=data.nextSeq;renderTable();});return;}
@@ -511,7 +515,7 @@ $('import-form').addEventListener('submit',e=>{e.preventDefault();run(()=>save('
 $('confirm-form').addEventListener('submit',e=>{e.preventDefault();run(()=>save(confirmation,'DELETE',undefined,'已删除并应用',$('confirm-dialog')),$('confirm-dialog'));});
 $('table').addEventListener('click',e=>{
   const target=e.target.closest('[data-action]');if(!target||busy)return;const {action,id}=target.dataset;
-  if(['check-proxy-group','edit-proxy-group','delete-proxy-group'].includes(action))return;
+  if(['check-proxy-group','edit-proxy-group','delete-proxy-group','edit-category','category-rules','delete-category','restore-category'].includes(action))return;
   if(action==='toggle-group'){if(collapsedGroups.has(id))collapsedGroups.delete(id);else collapsedGroups.add(id);renderTable();return;}
   if(action==='check-group'){requestCheck('/api/node-checks/batch',{ids:groupTargets(id)});return;}
   if(action==='node-details'){detailNodeId=id;openDialog('node-details');updateNodeDetails();return;}
@@ -538,7 +542,7 @@ function navigate(){
   const name=location.hash.slice(1);page=pages[name]?name:'listeners';$('search').value='';render();
   if(page==='observe')pollObserve();
   pollExits();
-  if(page==='routing')loadRouting().then(render).catch(error=>notice(error.message,true));
+  if(page==='routing'&&!$('workspace').hidden)loadRouting().then(render).catch(error=>notice(error.message,true));
 }
 window.addEventListener('hashchange',navigate);
 document.addEventListener('click',event=>{document.querySelectorAll('.node-menu[open]').forEach(menu=>{if(!menu.contains(event.target))menu.removeAttribute('open');});});
@@ -548,4 +552,5 @@ setInterval(pollChecks,1000);
 setInterval(pollObserve,2000);
 setInterval(pollExits,1000);
 initRoutingUI();
+initRoutingSourcesUI();
 start();

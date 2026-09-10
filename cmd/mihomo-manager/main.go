@@ -126,6 +126,7 @@ func run() error {
 		}
 	}()
 	control := manager.NewServer(m, key)
+	control.RoutingSources.Start()
 	defer control.Close()
 	server := &http.Server{Addr: addr, Handler: control.Handler(web.Handler()), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	done := make(chan error, 1)

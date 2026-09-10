@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light"><title>Mihomo Manager</title>
-  <link rel="stylesheet" href="/style.css"><script src="/routing-ui.js" defer></script><script src="/app.js" defer></script>
+  <link rel="stylesheet" href="/style.css"><script src="/routing-ui.js" defer></script><script src="/routing-sources.js" defer></script><script src="/app.js" defer></script>
 </head>
 <body>
   <section id="login" class="login-shell" hidden>
@@ -113,8 +113,9 @@
   <dialog id="group-dialog" aria-labelledby="group-title"><form id="group-form">
  <div class="dialog-heading"><h2 id="group-title">新增代理组</h2><button type="button" data-close class="close" aria-label="关闭">×</button></div>
  <input id="group-id" type="hidden"><label for="group-name">分组名称</label><input id="group-name" required maxlength="64" placeholder="例如：工作服务">
- <label for="group-kind">出口选择方式</label><select id="group-kind"><option value="select">手动选择 · 自己指定节点</option><option value="url-test">自动选择 · 优先低延迟节点</option><option value="fallback">故障转移 · 按成员顺序选择可用节点</option></select>
- <label class="checkbox"><input id="group-all" type="checkbox" checked>使用全部已启用节点，跟随订阅更新</label>
+ <label class="checkbox" id="group-inherit-label"><input id="group-inherit" type="checkbox">保持原方案的选择方式与成员，只修改名称</label>
+ <label for="group-kind">出口选择方式</label><select id="group-kind"><option value="select">手动选择 · 自己指定节点</option><option value="url-test">自动选择 · 优先低延迟节点</option><option value="fallback">故障转移 · 按成员顺序选择可用节点</option><option value="load-balance">负载均衡 · 分散连接</option></select>
+ <label class="checkbox"><input id="group-all" type="checkbox" checked>使用全部已启用节点，跟随关联订阅更新</label>
  <div id="group-member-field"><label for="group-node-search">选择成员</label><input id="group-node-search" type="search" placeholder="搜索节点…"><div id="group-members" class="node-picker"></div><label>成员顺序</label><div id="group-order"></div></div>
  <p class="field-hint">自动选择与故障转移每 5 分钟检查一次。没有可用成员时阻止连接；手动组也可选择默认代理、直连或拦截。</p>
  <p class="dialog-error error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close class="quiet">取消</button><button type="submit" class="primary">保存并应用</button></div>
@@ -124,5 +125,33 @@
  <p class="muted">勾选需要的分类，自动添加规则集和代理组，然后为每组选择节点。</p><div id="template-list" class="template-list"></div>
  <p class="field-hint">来源 MetaCubeX/meta-rules-dat，每天更新。新分类默认排序 300，位于默认广告拦截之后、订阅及通用国内外规则之前。已有分组或规则集不会覆盖。</p>
  <p class="dialog-error error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close class="quiet">取消</button><button type="submit" class="primary">添加并应用</button></div>
+ </form></dialog>
+
+ <dialog id="source-dialog" aria-labelledby="source-title"><form id="source-form">
+ <div class="dialog-heading"><h2 id="source-title">订阅分流方案</h2><button type="button" data-close class="close" aria-label="关闭">×</button></div>
+ <input type="hidden" id="source-id"><input type="hidden" id="source-version">
+ <label for="source-name">方案名称</label><input id="source-name" required maxlength="120" placeholder="例如：我的日常分流">
+ <label for="source-url">分流订阅地址</label><input id="source-url" type="url" required placeholder="https://…/config.yaml" autocomplete="off"><p class="field-hint">支持标准 Mihomo YAML 或 clash-converter 生成的订阅地址，直接引用现有节点。</p>
+ <div class="listener-fields"><div><label for="source-interval">更新间隔（小时）</label><input id="source-interval" type="number" min="0.01" max="720" step="any" value="24" required></div><div><label class="checkbox"><input id="source-auto" type="checkbox" checked>自动检查更新</label></div></div>
+ <details class="advanced"><summary>关联节点与 DNS</summary><p class="field-hint">不勾选来源表示使用全部节点；订阅里的节点配置仅用于匹配，不会导入或覆盖节点。</p><div id="source-node-sources"></div><label class="checkbox"><input id="source-dns" type="checkbox">采用方案的 DNS 解析器和域名策略</label><p class="field-hint">监听、控制接口、TUN 仍由管理器控制。DNS 使用普通域名解析模式，不导入 DNS 监听端口。</p></details>
+ <div id="source-preview" class="source-preview" aria-live="polite"></div>
+ <p class="dialog-error error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close class="quiet">取消</button><button id="source-preview-button" type="button" class="quiet">预览并校验</button><button id="source-save" type="submit" class="primary" disabled>保存方案</button></div>
+ </form></dialog>
+ <dialog id="category-entries-dialog" aria-labelledby="category-entries-title">
+ <div class="dialog-heading"><h2 id="category-entries-title">组内规则</h2><button type="button" data-close class="close" aria-label="关闭">×</button></div>
+ <p class="field-hint">本地规则优先于订阅规则。修改来源规则会保存为本地覆盖；停用与删除记录在订阅更新后保留。</p>
+ <div class="entry-toolbar"><input type="search" id="category-entry-search" aria-label="搜索组内规则" placeholder="搜索域名、IP 或规则集…"><button id="new-category-rule" type="button" class="primary">新增域名或 IP</button></div>
+ <div id="category-entry-list"></div><div class="entry-pagination dialog-actions"><button id="entry-previous" type="button">上一页</button><span id="entry-page-status"></span><button id="entry-next" type="button">下一页</button></div>
+ <p class="dialog-error error-text" role="alert"></p>
+ </dialog>
+ <dialog id="category-rule-dialog" aria-labelledby="category-rule-title"><form id="category-rule-form">
+ <div class="dialog-heading"><h2 id="category-rule-title">新增组内规则</h2><button type="button" data-close class="close" aria-label="关闭">×</button></div>
+ <input type="hidden" id="category-rule-id"><input type="hidden" id="category-rule-replaces">
+ <label for="category-rule-policy">归属分类</label><select id="category-rule-policy"></select>
+ <label for="category-rule-kind">匹配方式</label><select id="category-rule-kind"><option value="DOMAIN-SUFFIX">域名及其子域名</option><option value="DOMAIN">仅此域名</option><option value="IP">IP 地址或网段</option></select>
+ <label for="category-rule-value">域名或 IP</label><input id="category-rule-value" required placeholder="example.com 或 203.0.113.0/24"><p class="field-hint">不要填写 http:// 或路径。单个 IP 会自动转换为 /32 或 /128。</p>
+ <label for="category-rule-position">本地规则优先级</label><input id="category-rule-position" type="number" min="0" max="100000" value="100" required><p class="field-hint">本地规则始终先于上游规则；本地规则之间数值越小越优先。</p>
+ <label class="checkbox"><input id="category-rule-enabled" type="checkbox" checked>启用此规则</label>
+ <p class="dialog-error error-text" role="alert"></p><div class="dialog-actions"><button type="button" data-close class="quiet">取消</button><button type="submit" class="primary">保存并应用</button></div>
  </form></dialog>
 </body></html>

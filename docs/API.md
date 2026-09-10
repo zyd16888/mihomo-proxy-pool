@@ -193,3 +193,45 @@
 规则集策略在保存时根据当前配置校验。订阅组随后消失时，规则构建将失效目标降级为 REJECT，避免整个配置失败或意外直连；管理页面显示出口失效。默认排序 300，IP 模板为 310；若人为调整过原规则优先级，需要再次核对首次命中的顺序。
 
 选择变更通过完整配置应用事务生效，不直接暴露内核控制接口；内部出口探测组不能通过上述接口切换。选择写入生成配置的首个成员，重载与失败回滚均恢复对应配置的选择，`last-good.yaml` 可独立恢复上一版成功选择。
+
+
+## 外部方案订阅和分类规则
+
+所有接口沿用登录会话与同源校验。方案的唯一标识为 `id`；本地方案使用空字符串 `scope`。每个 scope 分别保存选择、分类覆盖、自定义条目及来源规则屏蔽记录。`GET /api/state` 增加 `routingSources`、`activeRoutingSource`、`categoryEdits`、`categoryRules`、`blockedRules`。快照正文不出现在状态响应中。
+
+### 方案生命周期
+
+`POST /api/routing-sources/preview` 请求：
+
+```json
+{"id":"编辑时填写","version":1,"name":"日常分流","url":"https://example.com/config.yaml","interval":86400,"autoUpdate":true,"sourceIds":[],"bindings":{"来源节点名称":"本地节点ID"},"importDns":false}
+```
+
+新建省略 id/version。响应包含 `errors`、`unresolved`、`mappings`、`ignored`、`groupNames`、`source` 和 `changed`。只有解析、绑定及校验成功才返回 `token`。失败以结构化预览返回，不写配置；单文档最大 32 MiB，最多 512 个分组。`sourceIds` 是本地节点订阅 ID，空数组表示全部来源；其中空字符串表示手动导入来源。
+
+- `POST /api/routing-sources`：`{"token":"预览令牌"}`，保存刚刚预览的候选，令牌 10 分钟有效且一次性消费；源版本或配置版本变化后拒绝，避免提交陈旧预览。返回 `saved/changed`，新方案先保存为未启用。
+- `POST /api/routing-sources/activate`：`{"id":"方案ID"}`，空 id 切回本地；验证与应用成功后才持久化切换，失败保留之前方案。
+- `POST /api/routing-sources/{id}/refresh`：立即检查并更新，返回 `changed`。同源检查去重，失败记录 source.lastError，保留成功快照；未变内容不增加配置版本或重载。
+- `DELETE /api/routing-sources/{id}`：仅删除非活动方案，清理该 scope 的选择与覆盖；不变更其他配置的版本。
+
+自动检查间隔为 60 秒至 30 天；到期扫描周期 30 秒，启动后首次扫描约 1 秒。元数据包含 `version/digest/checkedAt/updatedAt/lastError/groups/rules/providers/ignored`。URL 可能含令牌，日志和摘要不应完整展示其查询字符串。
+
+### 分类与条目
+
+| 接口 | 请求与行为 |
+| --- | --- |
+| `PUT /api/categories` | `{"scope":"","edit":{"name":"原始组标识","label":"显示名","kind":"select","members":["node-ID","DIRECT"],"allNodes":true,"deleted":false}}` |
+| `POST /api/categories/restore` | `{"scope":"","name":"组标识"}`；已删除组恢复删除前设置，未删除组撤销本地分组设置 |
+| `GET /api/routing-entries?policy=…&q=…&offset=0` | 当前方案的规则条目，每页最多 100 条，返回 entries/total/offset/scope；policy 留空查询全部 |
+| `POST /api/category-rules` | `{"scope":"","rule":{"policy":"组标识","kind":"DOMAIN-SUFFIX","value":"example.com","position":100,"enabled":true}}` |
+| `PUT /api/category-rules/{id}` | 更新本地条目，未知 id 不创建新记录 |
+| `DELETE /api/category-rules/{id}?scope=…` | 删除本地补充条目 |
+| `POST /api/routing-entries/block` | `{"scope":"","id":"来源条目ID","text":"原始规则","block":true}`；false 恢复来源条目 |
+
+新建分类省略 name，服务端生成稳定引用。编辑已有分类时 kind 为空表示只修改显示名称，沿用原有成员和方式。kind 支持 select/url-test/fallback/load-balance；members 可包含当前方案的组、关联节点、DIRECT/REJECT。整组删除使用 deleted:true，保留可恢复定义，规则和引用在生成阶段移除。
+
+条目 kind 支持 DOMAIN、DOMAIN-SUFFIX、IP（也接受 IP-CIDR/IP-CIDR6），服务端规范化地址和 CIDR。编辑来源域名/IP 时，新条目携带 `replacesText`，同一数据库事务中写入补充规则并屏蔽原规则；未知的原规则不能被替换。来源条目的 id 按原规则文本摘要生成，顺序变化不会使屏蔽失效。
+
+scope 与当前活动方案不一致时拒绝写入。分类及条目写接口返回既有 saved/apply，保存不代表应用成功；前端必须检查 apply.applied。选择接口 `PUT /api/proxy-selection` 自动使用当前方案的独立选择表。
+
+`GET /api/routing` 增加 sources/activeSource/categoryEdits/finalPolicy，proxyGroups 增加 label/edited/ruleCount/allNodes/configuredMembers；ruleSets 返回当前方案的有效规则集入口。`POST /api/rule-sets/refresh` 仅更新当前生效配置的 HTTP 规则提供者，inline 提供者不发起网络更新。

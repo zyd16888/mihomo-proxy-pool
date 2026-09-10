@@ -12,7 +12,7 @@ function nodeDelayResult(id) {
 }
 function outboundName(name) {
   if(name?.startsWith('node-'))return activeNode(name.slice(5))?.name||'节点已移除';
-  return {DIRECT:'直连',REJECT:'拦截'}[name]||name||'—';
+  return {DIRECT:'直连',REJECT:'拦截'}[name]||routingView.proxyGroups?.find(g=>g.name===name)?.label||name||'—';
 }
 function memberDelay(name) {
   if(name?.startsWith('node-'))return delayCell(name.slice(5));
@@ -47,13 +47,15 @@ function proxyGroupTargets(group,seen=new Set()) {
   return [...new Set(group.members.flatMap(member=>member.startsWith('node-')?[member.slice(5)]:proxyGroupTargets(routingView.proxyGroups?.find(g=>g.name===member),seen)))].filter(id=>{const n=activeNode(id);return n?.enabled&&n?.available;});
 }
 function renderRouting(items) {
-  const tabBar=`<div class="routing-tabs" role="tablist" aria-label="分流视图"><button id="routing-groups-tab" role="tab" aria-selected="${routingTab==='groups'}" aria-controls="routing-content" data-routing-tab="groups">代理组 <span>${routingView.proxyGroups?.length||0}</span></button><button id="routing-rules-tab" role="tab" aria-selected="${routingTab==='rules'}" aria-controls="routing-content" data-routing-tab="rules">规则集 <span>${state.ruleSets?.length||0}</span></button></div>`;
+  $('create').textContent=routingTab==='sources'?'＋ 订阅分流方案':state.activeRoutingSource?'＋ 新增分类':'＋ 添加分类';
+  const tabBar=`<div class="routing-tabs" role="tablist" aria-label="分流视图"><button id="routing-groups-tab" role="tab" aria-selected="${routingTab==='groups'}" aria-controls="routing-content" data-routing-tab="groups">代理组 <span>${routingView.proxyGroups?.length||0}</span></button><button id="routing-rules-tab" role="tab" aria-selected="${routingTab==='rules'}" aria-controls="routing-content" data-routing-tab="rules">规则集 <span>${state.ruleSets?.length||0}</span></button><button id="routing-sources-tab" role="tab" aria-selected="${routingTab==='sources'}" aria-controls="routing-content" data-routing-tab="sources">方案订阅 <span>${state.routingSources?.length||0}</span></button></div>`;
   let content;
-  if(routingTab==='rules') {
+  if(routingTab==='sources'){content=renderRoutingSources();}
+  else if(routingTab==='rules') {
     content='<p class="routing-caption">从上到下首次命中即生效。排序值越小越优先；细分类应排在通用国内外规则之前。</p>'+renderRuleSets(items);
   } else {
     const term=$('search').value.trim().toLowerCase();
-    const groups=(routingView.proxyGroups||[]).filter(g=>[g.name,...g.members.map(outboundName),...g.ruleSets].some(v=>v.toLowerCase().includes(term)));
+    const groups=(routingView.proxyGroups||[]).filter(g=>[g.label||g.name,...g.members.map(outboundName),...g.ruleSets].some(v=>v.toLowerCase().includes(term)));
     $('row-count').textContent=`${groups.length} / ${routingView.proxyGroups?.length||0}`;
     content=`<p class="routing-caption">规则命中分类后，使用对应代理组的出口。所有规则监听共享此配置。</p>${routingView.runtimeError?`<p class="error-text">${escapeHTML(routingView.runtimeError)}</p>`:''}<div class="proxy-groups">${groups.map(renderProxyGroup).join('')||'<p class="picker-empty">没有匹配的分组。添加规则分类，或新增代理组。</p>'}</div>`;
   }
@@ -67,29 +69,17 @@ function renderProxyGroup(group) {
   const action=group.kind==='select'?'选择后保存并应用':'由内核自动选择';
   const matches=group.ruleSets.length?group.ruleSets.join('、'):group.customId?'尚未关联规则集，可在“自定义规则”中选择此分组':'基础策略或订阅分组';
   return `<section class="proxy-group${expanded?' expanded':''}">
-    <div class="proxy-group-head"><button type="button" class="proxy-group-toggle" data-expand-proxy="${escapeHTML(group.name)}" aria-expanded="${expanded}"><span class="group-chevron" aria-hidden="true">${expanded?'⌄':'›'}</span><span class="proxy-group-heading"><strong>${escapeHTML(group.name)}</strong><span class="proxy-group-chain">${escapeHTML(chain||'等待内核选择')}</span></span></button><span class="group-kind">${escapeHTML(kind)}</span><span class="group-count">${group.members.length}</span><div class="actions"><button type="button" data-action="check-proxy-group" data-id="${escapeHTML(group.name)}"${busy||batchActive()||checkRequestBusy||!checkReady()||!proxyGroupTargets(group).length?' disabled':''}>检测本组</button>${group.customId?button('编辑','edit-proxy-group',group.customId):''}</div></div>
+    <div class="proxy-group-head"><button type="button" class="proxy-group-toggle" data-expand-proxy="${escapeHTML(group.name)}" aria-expanded="${expanded}"><span class="group-chevron" aria-hidden="true">${expanded?'⌄':'›'}</span><span class="proxy-group-heading"><strong>${escapeHTML(group.label||group.name)}</strong><span class="proxy-group-chain">${escapeHTML(chain||'等待内核选择')}</span></span></button><span class="group-kind">${escapeHTML(kind)}</span><span class="group-count">${group.members.length}</span><div class="actions"><button type="button" data-action="check-proxy-group" data-id="${escapeHTML(group.name)}"${busy||batchActive()||checkRequestBusy||!checkReady()||!proxyGroupTargets(group).length?' disabled':''}>检测本组</button>${button('编辑','edit-category',group.name)}${button('规则 '+group.ruleCount,'category-rules',group.name)}</div></div>
     ${group.warning?`<p class="group-warning">${escapeHTML(group.warning)}</p>`:''}
     ${expanded?`<div class="proxy-group-body"><div class="group-description"><span>${escapeHTML(matches)}</span><small>${action}</small></div><div class="proxy-member-grid">${group.members.map(member=>{
       const n=member.startsWith('node-')?activeNode(member.slice(5)):null;
       const result=n?nodeDelayResult(n.id):null;
       return `<div class="proxy-member${selected===member?' selected':''}"><button type="button" class="member-choice" data-select-group="${escapeHTML(group.name)}" data-member="${escapeHTML(member)}" aria-pressed="${selected===member}"${group.kind!=='select'||busy?' disabled':''}><span class="choice-dot" aria-hidden="true"></span><span class="member-copy"><strong>${escapeHTML(outboundName(member))}</strong><small>${escapeHTML(n?nodeSource(n):member==='DIRECT'?'直接连接目标':member==='REJECT'?'阻止连接':'代理组')}</small></span><span class="member-delay"${n?` data-check-result="${n.id}"`:''}>${memberDelay(member)}</span></button>${n?`<button type="button" class="member-check" data-member-check="${n.id}" aria-label="检测 ${escapeHTML(n.name)}"${!checkReady()||result?.inFlight?' disabled':''}>检测</button>`:''}</div>`;
-    }).join('')}</div>${group.customId?`<div class="group-footer">${button('删除分组','delete-proxy-group',group.customId,'remove')}</div>`:''}</div>`:''}
+    }).join('')}</div><div class="group-footer">${group.edited?button('恢复原始设置','restore-category',group.name):''}${button('删除整个规则组','delete-category',group.name,'remove')}</div></div>`:''}
   </section>`;
 }
-function editProxyGroup(id='') {
-  const group=state.proxyGroups?.find(g=>g.id===id);
-  $('group-form').reset();$('group-id').value=id;$('group-title').textContent=group?'编辑代理组':'新增代理组';
-  $('group-name').value=group?.name||'';$('group-name').readOnly=!!group;
-  $('group-kind').value=group?.kind||'select';
-  editingGroupMembers=[...(group?.nodeIds||[])];$('group-all').checked=!editingGroupMembers.length;
-  renderGroupEditor();openDialog('group-dialog');
-}
-function renderGroupEditor() {
-  $('group-member-field').hidden=$('group-all').checked;
-  const term=$('group-node-search').value.trim().toLowerCase();
-  setHTML($('group-members'),state.nodes.filter(n=>[n.name,nodeSource(n)].some(v=>v.toLowerCase().includes(term))).map(n=>`<label class="group-node-option"><input type="checkbox" data-group-node="${n.id}"${editingGroupMembers.includes(n.id)?' checked':''}><span>${escapeHTML(n.name)}<small>${escapeHTML(nodeSource(n))}${n.enabled&&n.available?'':' · 不可用'}</small></span><span>${delayCell(n.id)}</span></label>`).join(''));
-  setHTML($('group-order'),editingGroupMembers.map((id,index)=>`<div class="group-order-row"><span>${index+1}. ${escapeHTML(activeNode(id)?.name||'已移除节点')}</span><button type="button" data-group-move="${id}" data-direction="-1"${index===0?' disabled':''} aria-label="上移 ${escapeHTML(activeNode(id)?.name||'节点')}">↑</button><button type="button" data-group-move="${id}" data-direction="1"${index===editingGroupMembers.length-1?' disabled':''} aria-label="下移 ${escapeHTML(activeNode(id)?.name||'节点')}">↓</button><button type="button" data-group-remove="${id}" aria-label="移除 ${escapeHTML(activeNode(id)?.name||'节点')}">×</button></div>`).join(''));
-}
+function editProxyGroup(id='') {const group=state.proxyGroups?.find(g=>g.id===id);openCategoryEditor(group?.name||'');}
+function renderGroupEditor(){renderCategoryEditor();}
 function openTemplates() {
   $('template-form').reset();
   $('template-list').innerHTML=(routingView.templates||[]).map(t=>{
@@ -129,12 +119,7 @@ function initRoutingUI() {
     if(remove)editingGroupMembers=editingGroupMembers.filter(id=>id!==remove.dataset.groupRemove);
     renderGroupEditor();
   });
-  $('group-form').addEventListener('submit',event=>{
-    event.preventDefault();
-    if(!$('group-all').checked&&!editingGroupMembers.length){$('group-dialog').querySelector('.dialog-error').textContent='请选择至少一个成员，或使用全部节点';return;}
-    const id=$('group-id').value;
-    run(()=>save('/api/proxy-groups'+(id?'/'+id:''),id?'PUT':'POST',{name:$('group-name').value,kind:$('group-kind').value,nodeIds:$('group-all').checked?[]:editingGroupMembers},'代理组已保存并应用',$('group-dialog')),$('group-dialog'));
-  });
+  $('group-form').addEventListener('submit',saveCategoryEditor);
   $('template-form').addEventListener('submit',event=>{
     event.preventDefault();const ids=[...$('template-list').querySelectorAll('input:checked')].map(input=>input.value);
     if(!ids.length){$('template-dialog').querySelector('.dialog-error').textContent='请至少选择一个分类';return;}

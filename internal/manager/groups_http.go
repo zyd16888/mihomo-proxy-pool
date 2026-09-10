@@ -25,20 +25,34 @@ func (r *Runtime) Proxies(ctx context.Context) (map[string]CoreProxy, error) {
 }
 
 type ProxyGroupView struct {
-	Name     string   `json:"name"`
-	Kind     string   `json:"kind"`
-	Members  []string `json:"members"`
-	Selected string   `json:"selected"`
-	Now      string   `json:"now"`
-	Chain    []string `json:"chain"`
-	Live     bool     `json:"live"`
-	Warning  string   `json:"warning,omitempty"`
-	CustomID string   `json:"customId,omitempty"`
-	RuleSets []string `json:"ruleSets"`
+	AllNodes          bool     `json:"allNodes"`
+	ConfiguredMembers []string `json:"configuredMembers"`
+	Label             string   `json:"label"`
+	Edited            bool     `json:"edited"`
+	RuleCount         int      `json:"ruleCount"`
+	Name              string   `json:"name"`
+	Kind              string   `json:"kind"`
+	Members           []string `json:"members"`
+	Selected          string   `json:"selected"`
+	Now               string   `json:"now"`
+	Chain             []string `json:"chain"`
+	Live              bool     `json:"live"`
+	Warning           string   `json:"warning,omitempty"`
+	CustomID          string   `json:"customId,omitempty"`
+	RuleSets          []string `json:"ruleSets"`
 }
 
 func (s *Server) groupViews(ctx context.Context, state State) ([]ProxyGroupView, map[string]CoreProxy, string) {
 	groups := routingPreview(state)
+	preview := state
+	preview.Routing.Enabled = true
+	preview.Listeners = []Listener{{Mode: ListenerModeRule, Enabled: true}}
+	plan, _ := compileRouting(preview)
+	counts := map[string]int{}
+	for _, rule := range plan.Rules {
+		counts[rulePolicy(rule)]++
+	}
+	policies := policyOptions(state)
 	core := map[string]CoreProxy{}
 	runtimeError := ""
 	live := state.Routing.Enabled && hasRuleListener(state) && state.Revision == state.AppliedRevision && state.LastError == ""
@@ -64,7 +78,28 @@ func (s *Server) groupViews(ctx context.Context, state State) ([]ProxyGroupView,
 		if len(members) > 0 && v.Selected == "" && v.Kind == "select" {
 			v.Selected = members[0]
 		}
-		if name == GroupFinal && !slices.Contains(policyOptions(state), state.Routing.DefaultPolicy) {
+		v.ConfiguredMembers = append([]string{}, members...)
+		if source := state.activeRoutingSource(); source != nil {
+			for _, raw := range source.Document.Groups {
+				if stringOf(raw["name"]) == name {
+					v.AllNodes = truthy(raw["include-all"]) || truthy(raw["include-all-proxies"])
+					v.ConfiguredMembers = stringsOf(raw["proxies"])
+				}
+			}
+		}
+		v.Label = name
+		v.RuleCount = counts[name]
+		for _, edit := range state.CategoryEdits {
+			if edit.Name == name {
+				v.Label = edit.Label
+				v.Edited = true
+				if edit.Kind != "" {
+					v.AllNodes = edit.AllNodes
+					v.ConfiguredMembers = edit.Members
+				}
+			}
+		}
+		if state.ActiveRoutingSource == "" && name == GroupFinal && !slices.Contains(policies, state.Routing.DefaultPolicy) {
 			v.Warning = "兜底策略已不存在，当前拦截流量，请重新设置"
 		}
 		if v.Selected != "" && !slices.Contains(members, v.Selected) {
@@ -75,7 +110,7 @@ func (s *Server) groupViews(ctx context.Context, state State) ([]ProxyGroupView,
 				v.CustomID = custom.ID
 			}
 		}
-		for _, set := range state.RuleSets {
+		for _, set := range effectiveRuleSets(state, plan) {
 			if set.Policy == name {
 				v.RuleSets = append(v.RuleSets, set.Name)
 			}

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -153,4 +154,55 @@ func TestRealKernelGroupRoutingAndRestart(t *testing.T) {
 	assertRoute("video", "via-B")
 	apply()
 	assertRoute("ai", "via-B")
+	// External converter-style YAML uses existing nodes and replaces only routing.
+	_, portA, _ := net.SplitHostPort(strings.TrimPrefix(a.URL, "http://"))
+	_, portB, _ := net.SplitHostPort(strings.TrimPrefix(b.URL, "http://"))
+	externalYAML := fmt.Sprintf(`mixed-port: 12345
+external-controller: 0.0.0.0:9999
+proxies:
+ - {name: A, type: http, server: 127.0.0.1, port: %s}
+ - {name: B, type: http, server: 127.0.0.1, port: %s}
+proxy-groups:
+ - {name: ExternalAI, type: select, proxies: [A, B]}
+ - {name: ExternalVideo, type: select, proxies: [B, A]}
+rules:
+ - DOMAIN,ai.demo.test,ExternalAI
+ - DOMAIN,video.demo.test,ExternalVideo
+ - MATCH,REJECT
+`, portA, portB)
+	external := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, externalYAML) }))
+	defer external.Close()
+	service := NewRoutingSourceService(m)
+	defer service.Close()
+	sourceID := addSource(t, service, external.URL)
+	requireOK(t, service.Activate(background, sourceID))
+	assertRoute("ai", "via-A")
+	assertRoute("video", "via-B")
+	requireOK(t, store.SaveCategoryRule(background, sourceID, CategoryRule{Policy: "ExternalAI", Kind: "DOMAIN", Value: "video.demo.test", Enabled: true, Position: 1}))
+	apply()
+	assertRoute("video", "via-A")
+	requireOK(t, store.SaveCategoryEdit(background, sourceID, CategoryEdit{Name: "ExternalAI", Label: "AI", Deleted: true}))
+	apply()
+	assertRoute("video", "via-B")
+	requireOK(t, store.SaveSelection(background, "ExternalVideo", "node-"+state.Nodes[0].ID))
+	apply()
+	assertRoute("video", "via-A")
+	stop()
+	requireOK(t, store.Close())
+	store, err = OpenStore(filepath.Join(dir, "manager.db"))
+	requireOK(t, err)
+	m.Store = store
+	requireOK(t, m.Bootstrap(background))
+	start()
+	assertRoute("video", "via-A")
+	apply()
+	if slices.Contains(groupNames(routingPreview(snapshot(t, store))), "ExternalAI") {
+		t.Fatal("deleted external group returned after restart")
+	}
+	requireOK(t, service.Activate(background, ""))
+	assertRoute("ai", "via-B")
+	assertRoute("video", "via-B")
+	requireOK(t, service.Activate(background, sourceID))
+	assertRoute("video", "via-A")
+
 }

@@ -119,7 +119,11 @@ func BuildConfig(state State, coreAddr, secret string) ([]byte, []int, error) {
 		ports = append(ports, probePort)
 	}
 
-	groups, rules, providers, dns, _ := BuildRouting(state, activeNodes)
+	plan, err := compileRouting(state)
+	if err != nil {
+		return nil, nil, err
+	}
+	groups, rules, providers, dns := plan.Groups, plan.Rules, plan.Providers, plan.DNS
 	if probeGroup != nil {
 		groups = append(groups, probeGroup)
 	}

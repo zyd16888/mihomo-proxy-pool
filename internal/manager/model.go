@@ -95,14 +95,19 @@ type SubscriptionProfile struct {
 }
 
 type State struct {
-	ProxyGroups   []ProxyGroup          `json:"proxyGroups"`
-	Selections    map[string]string     `json:"selections"`
-	Nodes         []Node                `json:"nodes"`
-	Subscriptions []Subscription        `json:"subscriptions"`
-	Listeners     []Listener            `json:"listeners"`
-	RuleSets      []RuleSet             `json:"ruleSets"`
-	Routing       Routing               `json:"routing"`
-	Profiles      []SubscriptionProfile `json:"-"`
+	RoutingSources      []RoutingSource       `json:"routingSources"`
+	ActiveRoutingSource string                `json:"activeRoutingSource"`
+	CategoryEdits       []CategoryEdit        `json:"categoryEdits"`
+	CategoryRules       []CategoryRule        `json:"categoryRules"`
+	BlockedRules        map[string]string     `json:"blockedRules"`
+	ProxyGroups         []ProxyGroup          `json:"proxyGroups"`
+	Selections          map[string]string     `json:"selections"`
+	Nodes               []Node                `json:"nodes"`
+	Subscriptions       []Subscription        `json:"subscriptions"`
+	Listeners           []Listener            `json:"listeners"`
+	RuleSets            []RuleSet             `json:"ruleSets"`
+	Routing             Routing               `json:"routing"`
+	Profiles            []SubscriptionProfile `json:"-"`
 	// ProbePort is filled in by the manager, not the store: it is a deployment
 	// setting rather than saved configuration.
 	ProbePort       int    `json:"-"`

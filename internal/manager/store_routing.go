@@ -54,7 +54,13 @@ func (s *Store) SaveRouting(ctx context.Context, routing Routing) error {
 	if err != nil {
 		return err
 	}
-	if routing.DefaultPolicy == GroupFinal || !slices.Contains(policyOptions(state), routing.DefaultPolicy) {
+	if state.ActiveRoutingSource != "" {
+		routing.DefaultPolicy = state.Routing.DefaultPolicy
+		routing.MergeSubRules = state.Routing.MergeSubRules
+		routing.SubRulePosition = state.Routing.SubRulePosition
+		routing.RuleSetProxy = state.Routing.RuleSetProxy
+	}
+	if state.ActiveRoutingSource == "" && (routing.DefaultPolicy == GroupFinal || !slices.Contains(policyOptions(state), routing.DefaultPolicy)) {
 		return errors.New("默认策略不在可选策略中")
 	}
 	if routing.RuleSetProxy != "DIRECT" && routing.RuleSetProxy != GroupSelect {
@@ -94,6 +100,9 @@ func (s *Store) SaveRuleSet(ctx context.Context, set RuleSet) error {
 	if err != nil {
 		return err
 	}
+	if state.ActiveRoutingSource != "" {
+		return errors.New("请切换至本地方案编辑远程规则集定义，或在当前分类中添加本地规则")
+	}
 	if !slices.Contains(policyOptions(state), set.Policy) {
 		return errors.New("请选择存在的代理组、直连或拦截")
 	}
@@ -122,6 +131,13 @@ func (s *Store) SaveRuleSet(ctx context.Context, set RuleSet) error {
 }
 
 func (s *Store) DeleteRuleSet(ctx context.Context, id string) error {
+	state, err := s.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if state.ActiveRoutingSource != "" {
+		return errors.New("请在当前分类中停用来源规则，或切回本地方案删除规则集")
+	}
 	return s.mutate(ctx, func(tx *sql.Tx) error {
 		return changed(tx.ExecContext(ctx, `DELETE FROM rule_sets WHERE id=?`, id))
 	})

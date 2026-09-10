@@ -117,7 +117,7 @@ func routingPreview(state State) []map[string]any {
 }
 
 func policyOptions(state State) []string {
-	options := append([]string{}, PolicyTargets...)
+	options := []string{"DIRECT", "REJECT"}
 	for _, group := range routingPreview(state) {
 		name := stringOf(group["name"])
 		if !slices.Contains(options, name) {
@@ -138,6 +138,9 @@ func (s *Store) SaveProxyGroup(ctx context.Context, group ProxyGroup) error {
 	state, err := s.Snapshot(ctx)
 	if err != nil {
 		return err
+	}
+	if state.ActiveRoutingSource != "" {
+		return errors.New("当前为外部方案，请使用分类编辑或切回本地方案")
 	}
 	found := group.ID == ""
 	for _, old := range state.ProxyGroups {
@@ -182,6 +185,13 @@ func (s *Store) SaveProxyGroup(ctx context.Context, group ProxyGroup) error {
 }
 
 func (s *Store) DeleteProxyGroup(ctx context.Context, id string) error {
+	state, err := s.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if state.ActiveRoutingSource != "" {
+		return errors.New("请切回本地方案删除本地代理组")
+	}
 	return s.mutate(ctx, func(tx *sql.Tx) error {
 		var name string
 		if err := tx.QueryRowContext(ctx, `SELECT name FROM proxy_groups WHERE id=?`, id).Scan(&name); err != nil {
@@ -217,6 +227,10 @@ func (s *Store) SaveSelection(ctx context.Context, name, member string) error {
 			return errors.New("节点不在当前分组中，请刷新后重试")
 		}
 		return s.mutate(ctx, func(tx *sql.Tx) error {
+			if state.ActiveRoutingSource != "" {
+				_, err := tx.ExecContext(ctx, `INSERT INTO routing_source_selections(scope,name,member) VALUES(?,?,?) ON CONFLICT(scope,name) DO UPDATE SET member=excluded.member`, state.ActiveRoutingSource, name, member)
+				return err
+			}
 			_, err := tx.ExecContext(ctx, `INSERT INTO proxy_selections(name,member) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET member=excluded.member`, name, member)
 			return err
 		})
@@ -326,6 +340,9 @@ func (s *Store) AddRuleTemplates(ctx context.Context, ids []string) error {
 	state, err := s.Snapshot(ctx)
 	if err != nil {
 		return err
+	}
+	if state.ActiveRoutingSource != "" {
+		return errors.New("请切回本地方案添加内置模板")
 	}
 	policies := policyOptions(state)
 	return s.mutate(ctx, func(tx *sql.Tx) error {

@@ -19,25 +19,27 @@ import (
 )
 
 type Server struct {
-	Manager  *Manager
-	AdminKey string
-	mu       sync.Mutex
-	sessions map[string]time.Time
-	Checks   *NodeChecks
-	Observer *Observer
-	Exits    *ExitProbes
-	syncing  map[string]bool
+	Manager        *Manager
+	AdminKey       string
+	mu             sync.Mutex
+	sessions       map[string]time.Time
+	Checks         *NodeChecks
+	Observer       *Observer
+	Exits          *ExitProbes
+	RoutingSources *RoutingSourceService
+	syncing        map[string]bool
 }
 
 func NewServer(m *Manager, key string) *Server {
 	return &Server{
 		Manager: m, AdminKey: key, sessions: map[string]time.Time{},
 		Checks: NewNodeChecks(m), Observer: NewObserver(m), Exits: NewExitProbes(m, m.ProbePort),
-		syncing: map[string]bool{},
+		syncing: map[string]bool{}, RoutingSources: NewRoutingSourceService(m),
 	}
 }
 
 func (s *Server) Close() {
+	s.RoutingSources.Close()
 	s.Checks.Close()
 	s.Observer.Close()
 	s.Exits.Close()
@@ -80,6 +82,7 @@ func (s *Server) authenticated(r *http.Request) bool {
 
 func (s *Server) Handler(assets http.Handler) http.Handler {
 	mux := http.NewServeMux()
+	s.routingSourceRoutes(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
@@ -504,20 +507,32 @@ func (s *Server) readRouting(w http.ResponseWriter, r *http.Request) {
 			active = append(active, "node-"+n.ID)
 		}
 	}
-	groups, rules, providers, _, reports := BuildRouting(preview, active)
+	plan, buildErr := compileRouting(preview)
+	groups, rules, providers, reports := plan.Groups, plan.Rules, plan.Providers, plan.Reports
 	views, proxies, runtimeError := s.groupViews(r.Context(), state)
+	if buildErr != nil {
+		runtimeError = buildErr.Error()
+	}
+	finalPolicy := "REJECT"
+	if len(rules) > 0 {
+		finalPolicy = rulePolicy(rules[len(rules)-1])
+	}
 	respond(w, 200, map[string]any{
-		"routing":      state.Routing,
-		"ruleSets":     state.RuleSets,
-		"policies":     policyOptions(state),
-		"reports":      reports,
-		"groups":       len(groups),
-		"proxyGroups":  views,
-		"proxies":      proxies,
-		"runtimeError": runtimeError,
-		"templates":    RuleTemplates(),
-		"rules":        len(rules),
-		"providers":    len(providers),
+		"routing":       state.Routing,
+		"ruleSets":      effectiveRuleSets(state, plan),
+		"sources":       state.RoutingSources,
+		"activeSource":  state.ActiveRoutingSource,
+		"categoryEdits": state.CategoryEdits,
+		"finalPolicy":   finalPolicy,
+		"policies":      policyOptions(state),
+		"reports":       reports,
+		"groups":        len(groups),
+		"proxyGroups":   views,
+		"proxies":       proxies,
+		"runtimeError":  runtimeError,
+		"templates":     RuleTemplates(),
+		"rules":         len(rules),
+		"providers":     len(providers),
 	})
 }
 
@@ -554,13 +569,18 @@ func (s *Server) refreshRuleSets(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
 	defer cancel()
+	plan, err := compileRouting(state)
+	if err != nil {
+		problem(w, 400, err)
+		return
+	}
 	refreshed, failed := 0, []string{}
-	for _, set := range state.RuleSets {
-		if !set.Enabled {
+	for name, provider := range plan.Providers {
+		if stringOf(provider["type"]) != "http" {
 			continue
 		}
-		if err := s.Manager.Kernel.RefreshRuleProvider(ctx, set.Name); err != nil {
-			failed = append(failed, set.Name)
+		if err := s.Manager.Kernel.RefreshRuleProvider(ctx, name); err != nil {
+			failed = append(failed, name)
 			continue
 		}
 		refreshed++

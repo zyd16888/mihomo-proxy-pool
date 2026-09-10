@@ -285,6 +285,11 @@ func (o *Observer) Connections(ctx context.Context, state State) (ConnectionSnap
 	for _, n := range state.Nodes {
 		nodeNames["node-"+n.ID] = n.Name
 	}
+	for _, edit := range state.CategoryEdits {
+		if edit.Label != "" {
+			nodeNames[edit.Name] = edit.Label
+		}
+	}
 	listeners := map[string]Listener{}
 	for _, l := range state.Listeners {
 		listeners["listener-"+l.ID] = l
