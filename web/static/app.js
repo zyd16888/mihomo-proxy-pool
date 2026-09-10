@@ -4,7 +4,7 @@ const pages = {
   listeners: {title:'监听管理', create:'＋ 新增监听', search:'搜索名称、端口或节点…'},
   nodes: {title:'节点池', create:'＋ 导入节点', search:'搜索节点、协议或订阅…'},
   subscriptions: {title:'订阅管理', create:'＋ 添加订阅', search:'搜索订阅名称…'},
-  routing: {title:'规则分流', create:'＋ 新增规则集', search:'搜索规则集名称或地址…'},
+  routing: {title:'规则分流', create:'＋ 添加分类', search:'搜索分组、节点或规则集…'},
   observe: {title:'观测', create:'', search:'搜索目标、监听或规则…'},
 };
 let state = {nodes:[],listeners:[],subscriptions:[],ruleSets:[],routing:{}};
@@ -66,7 +66,7 @@ function batchActive() {return ['running','stopping'].includes(checks.batch?.sta
 function checkReady() {return state.coreReady&&state.revision===state.appliedRevision&&!state.lastError;}
 function checkTargets() {return page==='nodes'?filteredItems().filter(n=>n.enabled&&n.available).map(n=>n.id):[];}
 function delayCell(id) {
-  const result=checks.results[id];
+  const result=nodeDelayResult(id);
   if(!result)return '<span class="muted">未检测</span>';
   const label={queued:'排队中',running:'检测中',timeout:'超时',failed:'失败',cancelled:'已取消',stale:'已过期',skipped:'已跳过'}[result.status]||'未检测';
   const value=result.status==='success'?`<span class="mono latency-value">${escapeHTML(result.delayMs)} ms</span>`:tag(label,['failed','timeout'].includes(result.status)?'error':['running','queued'].includes(result.status)?'pending':'');
@@ -117,6 +117,7 @@ function renderChecks() {
     button.disabled=busy||checkRequestBusy||batchActive()||!checkReady()||count===0;
   });
   updateNodeDetails();
+  if($('listener-dialog').open)renderListenerPicker();
   document.querySelectorAll('[data-action="check"]').forEach(button=>{
     const result=checks.results[button.dataset.id],node=activeNode(button.dataset.id);
     button.disabled=checkRequestBusy||busy||!checkReady()||!node?.enabled||!node?.available||!!result?.inFlight;
@@ -132,7 +133,7 @@ async function requestCheck(path,body) {
 }
 async function pollChecks() {
   if(checksLoading||checkRequestBusy||document.hidden||$('workspace').hidden)return;
-  if(page!=='nodes'&&!batchActive()&&!Object.values(checks.results).some(r=>r.inFlight))return;
+  if(!['nodes','listeners','routing'].includes(page)&&!batchActive()&&!Object.values(checks.results).some(r=>r.inFlight))return;
   checksLoading=true;const serial=++checkSerial;
   try{acceptChecks(await api('/api/node-checks'),serial);renderChecks();}
   catch(error){notice(error.message,true);}
@@ -265,7 +266,7 @@ function renderPageTools() {
     return;
   }
   if(page==='routing'){
-    setHTML(tools,`<button type="button" class="quiet" data-action="routing-settings">分流设置</button><button type="button" class="quiet" data-action="refresh-rulesets">立即更新规则集</button>`);
+    setHTML(tools,`<button type="button" class="quiet" data-action="new-group">新增代理组</button><button type="button" class="quiet" data-action="new-ruleset">自定义规则</button><button type="button" class="quiet" data-action="routing-settings">分流设置</button><button type="button" class="quiet" data-action="refresh-rulesets">立即更新规则集</button>`);
     return;
   }
   if(page==='nodes'){
@@ -298,7 +299,7 @@ function routingSummary() {
     const renamed=(r.renamed||[]).length?`<div class="merge-renamed">重命名：${r.renamed.map(escapeHTML).join('、')}</div>`:'';
     return `<div class="merge-report"><strong>${escapeHTML(r.subscription)}</strong><span>合并 ${kept}</span>${dropped?`<span class="quota-warning">丢弃 ${dropped}</span>`:''}${renamed}</div>`;
   }).join(''):'<div class="merge-report muted">订阅没有自带规则，或未开启合并。当前只使用下方规则集。</div>';
-  const figures=`<span class="routing-figures">策略组 <b>${view.groups||0}</b> · 规则 <b>${view.rules||0}</b> · 规则集 <b>${view.providers||0}</b> · 兜底 <b>${escapeHTML(routing.defaultPolicy||'—')}</b> · DNS ${routing.dnsEnabled?'已生成':'未生成'}</span>`;
+  const figures=`<span class="routing-figures">策略组 <b>${view.groups||0}</b> · 规则 <b>${view.rules||0}</b> · 规则集 <b>${view.providers||0}</b> · 兜底 <b>${escapeHTML(routing.defaultPolicy||'—')}</b> · DNS ${routing.dnsEnabled?'已配置':'未配置'}</span>`;
   return `<section class="routing-summary">
     <div class="routing-status">${status}<span>${escapeHTML(hint)}</span>${figures}</div>
     <details class="routing-detail"${reports.length?'':' hidden'}>
@@ -311,14 +312,14 @@ function renderRuleSets(items) {
   const rows=items.map(s=>`<tr${s.enabled?'':' class="is-off"'}>
     <td><span class="mono">${s.position}</span></td>
     <td class="primary-cell"><span class="ruleset-name" title="${escapeHTML(s.url)}">${escapeHTML(s.name)}</span>${s.builtin?tag('内置'):''}</td>
-    <td>${escapeHTML(s.policy)}</td>
+    <td>${escapeHTML(s.policy)}${routingView.policies?.includes(s.policy)?'':'<span class="error-text">出口已失效 · 当前拦截</span>'}</td>
     <td class="muted" title="每 ${Math.round(s.interval/3600)} 小时更新">${escapeHTML(s.behavior)} · ${escapeHTML(s.format)}${s.noResolve?' · no-resolve':''}</td>
     <td>${s.enabled?tag('启用中','ready'):tag('已停用')}</td>
     <td><div class="actions">${button('编辑','edit-ruleset',s.id)}${button(s.enabled?'停用':'启用','toggle-ruleset',s.id)}${button('删除','delete-ruleset',s.id,'remove')}</div></td></tr>`);
   const table=items.length
     ?`<table><thead><tr>${['排序','名称','命中策略','类型','状态','操作'].map(h=>`<th scope="col">${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`
     :'<div class="empty"><strong>没有规则集</strong><p>新增一个规则集，或恢复默认的国内、国外与广告列表。</p></div>';
-  return routingSummary()+table;
+  return table;
 }
 function renderConnections(items) {
   if(connectionsError)return `<div class="empty"><strong>${escapeHTML(connectionsError)}</strong><p>内核就绪后会自动恢复。</p></div>`;
@@ -353,7 +354,7 @@ function renderTable() {
   renderPageTools();
   if(page==='nodes'){setHTML($('table'),renderNodeGroups(items));renderChecks();return;}
   if(page==='subscriptions'){setHTML($('table'),renderSubscriptionCards(items));renderChecks();return;}
-  if(page==='routing'){setHTML($('table'),renderRuleSets(items));renderChecks();return;}
+  if(page==='routing'){setHTML($('table'),renderRouting(items));renderChecks();return;}
   if(page==='observe'){setHTML($('table'),observeTab==='logs'?renderLogs():renderConnections(items));renderChecks();return;}
   if(!items.length){setHTML($('table'),'<div class="empty"><strong>没有监听记录</strong><p>先导入节点创建固定监听，或直接新增一个规则分流端口。</p></div>');renderChecks();return;}
   const rows=items.map(l=>{
@@ -363,8 +364,8 @@ function renderTable() {
     const outbound=l.mode==='rule'
       ? tag('规则分流','ready')
       : `${escapeHTML(n?.name||'节点不存在')}<span class="cell-sub">${escapeHTML(n?nodeSource(n):'')}</span>`;
-    return `<tr><td class="primary-cell">${escapeHTML(l.name)}</td><td><span class="mono port">${l.port}</span></td><td>${outbound}</td><td data-exit-listener="${l.id}">${exitCell('listeners',l.id)}</td><td>${listenerStatus(l)}</td><td><div class="actions">${button('探测出口','exit-listener',l.id)}${button('复制','copy',l.id)}${button('编辑','edit-listener',l.id)}${button(l.enabled?'停用':'启用','toggle-listener',l.id)}${button('删除','delete-listener',l.id,'remove')}</div></td></tr>`;});
-  setHTML($('table'),`<table><thead><tr>${['名称','端口','出口','出口 IP','状态','操作'].map(h=>`<th scope="col">${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`);renderChecks();
+    return `<tr><td class="primary-cell">${escapeHTML(l.name)}</td><td><span class="mono port">${l.port}</span></td><td>${outbound}</td><td>${l.mode==='rule'?'<a href="#routing">按目标分流</a>':`<span data-check-result="${l.nodeId}">${delayCell(l.nodeId)}</span>`}</td><td data-exit-listener="${l.id}">${exitCell('listeners',l.id)}</td><td>${listenerStatus(l)}</td><td><div class="actions">${button('探测出口','exit-listener',l.id)}${button('复制','copy',l.id)}${button('编辑','edit-listener',l.id)}${button(l.enabled?'停用':'启用','toggle-listener',l.id)}${button('删除','delete-listener',l.id,'remove')}</div></td></tr>`;});
+  setHTML($('table'),`<table><thead><tr>${['名称','端口','出口','节点延迟','出口 IP','状态','操作'].map(h=>`<th scope="col">${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`);renderChecks();
 }
 function openDialog(id) {const d=$(id);d.querySelector('.dialog-error').textContent='';d.showModal();}
 function syncListenerMode() {
@@ -380,20 +381,20 @@ function editListener(id='') {
   $('listener-name').value=l?.name||'';let port=17891;while(state.listeners.some(i=>i.port===port))port++;
   $('listener-port').value=l?.port||port;
   const nodes=state.nodes.filter(n=>(n.available&&n.enabled)||n.id===l?.nodeId);
-  $('listener-node').innerHTML='<option value="">选择一个节点</option>'+nodes.map(n=>`<option value="${n.id}">${escapeHTML(n.name)} · ${escapeHTML(nodeSource(n))}${!n.available||!n.enabled?'（不可用）':''}</option>`).join('');
   $('listener-node').value=l?.nodeId||'';$('listener-mode').value=l?.mode||(nodes.length?'node':'rule');
+  $('listener-node-search').value='';$('listener-node-success').checked=false;renderListenerPicker();
   $('listener-enabled').checked=l?.enabled??true;syncListenerMode();openDialog('listener-dialog');
 }
 function editRuleSet(id='') {
   const s=(state.ruleSets||[]).find(item=>item.id===id);$('ruleset-form').reset();$('ruleset-id').value=id;
   $('ruleset-title').textContent=s?'编辑规则集':'新增规则集';
   const policies=routingView.policies?.length?routingView.policies:['🌍 国外代理','🎯 国内直连','🛑 广告拦截','DIRECT','REJECT'];
-  $('ruleset-policy').innerHTML=policies.map(p=>`<option value="${escapeHTML(p)}">${escapeHTML(p)}</option>`).join('');
+  $('ruleset-policy').innerHTML=policies.map(p=>`<option value="${escapeHTML(p)}">${escapeHTML(outboundName(p))}</option>`).join('');
   $('ruleset-name').value=s?.name||'';$('ruleset-url').value=s?.url||'';
   $('ruleset-policy').value=s?.policy||policies[0];
   $('ruleset-behavior').value=s?.behavior||'domain';$('ruleset-format').value=s?.format||'mrs';
   let position=s?.position;
-  if(position===undefined){const used=(state.ruleSets||[]).map(item=>item.position);position=Math.max(500,...used,0)+10;}
+  if(position===undefined)position=300;
   $('ruleset-position').value=position;
   $('ruleset-interval').value=s?.interval||86400;
   $('ruleset-noresolve').checked=s?.noResolve??false;$('ruleset-enabled').checked=s?.enabled??true;
@@ -402,7 +403,7 @@ function editRuleSet(id='') {
 function openRoutingSettings() {
   const routing=state.routing||{};
   const policies=routingView.policies?.length?routingView.policies:['🌍 国外代理','🎯 国内直连','DIRECT'];
-  $('routing-default').innerHTML=policies.map(p=>`<option value="${escapeHTML(p)}">${escapeHTML(p)}</option>`).join('');
+  $('routing-default').innerHTML=policies.filter(p=>p!=='🐟 漏网之鱼').map(p=>`<option value="${escapeHTML(p)}">${escapeHTML(outboundName(p))}</option>`).join('');
   $('routing-enabled').checked=!!routing.enabled;
   $('routing-default').value=routing.defaultPolicy||policies[0];
   $('routing-subpos').value=routing.subRulePosition??500;
@@ -462,7 +463,7 @@ $('apply').addEventListener('click',()=>run(async()=>{const data=await api('/api
 $('create').addEventListener('click',()=>{
   if(page==='listeners'){editListener();return;}
   if(page==='nodes'){$('import-form').reset();openDialog('import-dialog');return;}
-  if(page==='routing'){editRuleSet();return;}
+  if(page==='routing'){openTemplates();return;}
   if(page==='subscriptions')editSubscription();
 });
 $('search').addEventListener('input',renderTable);
@@ -470,6 +471,8 @@ $('listener-mode').addEventListener('change',syncListenerMode);
 $('page-tools').addEventListener('click',event=>{
   const target=event.target.closest('[data-action]');if(!target||busy)return;
   const {action,id}=target.dataset;
+  if(action==='new-group'){editProxyGroup();return;}
+  if(action==='new-ruleset'){editRuleSet();return;}
   if(action==='observe-tab'){observeTab=id;renderTable();pollObserve();return;}
   if(action==='toggle-log-pause'){logsPaused=!logsPaused;renderTable();return;}
   if(action==='clear-logs'){run(async()=>{const data=await api('/api/logs','DELETE');logWindow.length=0;logs={...logs,...data,entries:undefined};logs.nextSeq=data.nextSeq;renderTable();});return;}
@@ -492,6 +495,7 @@ $('check-stop').addEventListener('click',()=>{if(checks.batch)requestCheck('/api
 document.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click',()=>{if(!busy)b.closest('dialog').close();}));
 document.querySelectorAll('dialog').forEach(d=>d.addEventListener('cancel',e=>{if(busy)e.preventDefault();}));
 $('listener-form').addEventListener('submit',e=>{e.preventDefault();const id=$('listener-id').value;const mode=$('listener-mode').value;
+  if(mode==='node'&&!$('listener-node').value){$('listener-dialog').querySelector('.dialog-error').textContent='请选择绑定节点';return;}
   run(()=>save('/api/listeners'+(id?'/'+id:''),id?'PUT':'POST',{name:$('listener-name').value,port:Number($('listener-port').value),mode,nodeId:mode==='rule'?'':$('listener-node').value,enabled:$('listener-enabled').checked},'监听已保存并应用',$('listener-dialog')),$('listener-dialog'));});
 $('routing-form').addEventListener('submit',e=>{e.preventDefault();
   run(()=>save('/api/routing','PUT',{enabled:$('routing-enabled').checked,defaultPolicy:$('routing-default').value,mergeSubRules:$('routing-merge').checked,
@@ -507,6 +511,7 @@ $('import-form').addEventListener('submit',e=>{e.preventDefault();run(()=>save('
 $('confirm-form').addEventListener('submit',e=>{e.preventDefault();run(()=>save(confirmation,'DELETE',undefined,'已删除并应用',$('confirm-dialog')),$('confirm-dialog'));});
 $('table').addEventListener('click',e=>{
   const target=e.target.closest('[data-action]');if(!target||busy)return;const {action,id}=target.dataset;
+  if(['check-proxy-group','edit-proxy-group','delete-proxy-group'].includes(action))return;
   if(action==='toggle-group'){if(collapsedGroups.has(id))collapsedGroups.delete(id);else collapsedGroups.add(id);renderTable();return;}
   if(action==='check-group'){requestCheck('/api/node-checks/batch',{ids:groupTargets(id)});return;}
   if(action==='node-details'){detailNodeId=id;openDialog('node-details');updateNodeDetails();return;}
@@ -542,4 +547,5 @@ setInterval(()=>{if(!$('workspace').hidden&&!busy&&!document.hidden)load().catch
 setInterval(pollChecks,1000);
 setInterval(pollObserve,2000);
 setInterval(pollExits,1000);
+initRoutingUI();
 start();

@@ -327,7 +327,16 @@ func (m *Manager) applyConfig(ctx context.Context, state State) error {
 	if err = atomicWrite(path, raw); err != nil {
 		return err
 	}
+	var candidateConfig struct {
+		Groups []map[string]any `yaml:"proxy-groups"`
+	}
+	if err := yaml.Unmarshal(raw, &candidateConfig); err != nil {
+		return err
+	}
 	applyErr := m.Kernel.Reload(ctx, path)
+	if applyErr == nil {
+		applyErr = m.restoreSelections(ctx, candidateConfig.Groups)
+	}
 	if applyErr == nil {
 		applyErr = m.Kernel.Verify(ctx, ports, difference(oldPorts, ports))
 	}
@@ -342,6 +351,15 @@ func (m *Manager) applyConfig(ctx context.Context, state State) error {
 	recoveryErr := atomicWrite(path, old)
 	if recoveryErr == nil {
 		recoveryErr = m.Kernel.Reload(recoveryCtx, path)
+		if recoveryErr == nil {
+			var previous struct {
+				Groups []map[string]any `yaml:"proxy-groups"`
+			}
+			recoveryErr = yaml.Unmarshal(old, &previous)
+			if recoveryErr == nil {
+				recoveryErr = m.restoreSelections(recoveryCtx, previous.Groups)
+			}
+		}
 	}
 	if recoveryErr == nil {
 		recoveryErr = m.Kernel.Verify(recoveryCtx, oldPorts, difference(ports, oldPorts))

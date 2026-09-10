@@ -164,3 +164,32 @@
 节点探测通过一个仅监听 `127.0.0.1` 的内部端口进行，该端口绑定独立的探测策略组；探测只切换这个策略组，不影响任何承载实际流量的监听。探测串行执行并保持约 1 秒间隔，以符合查询服务每个来源地址 60 次/分钟的限制；已有探测在进行时再次发起返回错误。结果只保存在内存，管理服务重启后清空。
 
 监听探测走该监听端口本身。对规则监听来说，得到的是**查询服务域名按当前规则实际使用的出口**；`ip9.com.cn` 是国内域名，命中国内直连时显示的就是直连地址。要确认代理节点的出口，请探测节点。
+
+
+## 代理组与分类模板
+
+以下写接口均要求现有登录会话和同源校验，返回 `saved` / `apply`，保存后增加配置版本并应用；应用失败时持久化意图仍保留为待应用。
+
+| 方法与路径 | 请求 / 行为 |
+| --- | --- |
+| `POST /api/proxy-groups` | `{"name":"工作服务","kind":"select","nodeIds":[]}` |
+| `PUT /api/proxy-groups/{id}` | 同上；名称不可修改，kind 可为 `select`、`url-test`、`fallback` |
+| `DELETE /api/proxy-groups/{id}` | 规则集或兜底仍引用时返回 400 |
+| `PUT /api/proxy-selection` | `{"name":"工作服务","member":"node-节点ID"}`；也支持该组实际包含的组名、DIRECT、REJECT；仅手动组可选 |
+| `POST /api/rule-templates` | `{"ids":["category-ai-!cn","youtube"]}`；一次事务创建分类组及关联规则，冲突时整批不写入 |
+
+`nodeIds: []` 表示跟随全部已启用、可用节点；非空数组表示显式成员，顺序用于故障转移。自动组没有可用成员时输出 REJECT。手动组始终可选默认节点组、直连与拦截。
+
+`GET /api/state` 增加 `proxyGroups: [{id,name,kind,nodeIds}]` 和 `selections: {组名: 成员名}`。
+
+`GET /api/routing` 保留原字段，并增加：
+
+- `policies`：动态包含基础组、自建组和当前可用的订阅组；兜底不能指向自身“漏网之鱼”。
+- `proxyGroups`：`[{name,kind,members,selected,now,chain,live,warning,customId,ruleSets}]`。成员中的 `node-<id>` 对应 state 节点；`selected` 是保存选择，`now/chain` 是已应用内核的实际出口，仅 `live:true` 时可信。没有活动规则监听、版本未应用或内核不可达时显示配置预览；失效选择保留并给出 warning。
+- `proxies`：内核代理类型、当前选择和延迟历史，不含代理配置及凭据。前端可在没有管理端检测结果时使用节点历史。
+- `runtimeError`：无法读取实际出口时的提示。
+- `templates`：`[{id,name,description,sets}]`，每个 set 含地址、行为、格式、顺序及默认代理组。可选 id 包括 category-ai-!cn、youtube、netflix、telegram、google、microsoft、apple、steam。
+
+规则集策略在保存时根据当前配置校验。订阅组随后消失时，规则构建将失效目标降级为 REJECT，避免整个配置失败或意外直连；管理页面显示出口失效。默认排序 300，IP 模板为 310；若人为调整过原规则优先级，需要再次核对首次命中的顺序。
+
+选择变更通过完整配置应用事务生效，不直接暴露内核控制接口；内部出口探测组不能通过上述接口切换。选择写入生成配置的首个成员，重载与失败回滚均恢复对应配置的选择，`last-good.yaml` 可独立恢复上一版成功选择。

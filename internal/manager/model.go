@@ -95,6 +95,8 @@ type SubscriptionProfile struct {
 }
 
 type State struct {
+	ProxyGroups   []ProxyGroup          `json:"proxyGroups"`
+	Selections    map[string]string     `json:"selections"`
 	Nodes         []Node                `json:"nodes"`
 	Subscriptions []Subscription        `json:"subscriptions"`
 	Listeners     []Listener            `json:"listeners"`

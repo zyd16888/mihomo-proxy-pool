@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -49,7 +50,11 @@ func (s *Store) routing(ctx context.Context) (Routing, error) {
 }
 
 func (s *Store) SaveRouting(ctx context.Context, routing Routing) error {
-	if !validPolicy(routing.DefaultPolicy) {
+	state, err := s.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if routing.DefaultPolicy == GroupFinal || !slices.Contains(policyOptions(state), routing.DefaultPolicy) {
 		return errors.New("默认策略不在可选策略中")
 	}
 	if routing.RuleSetProxy != "DIRECT" && routing.RuleSetProxy != GroupSelect {
@@ -68,6 +73,11 @@ func (s *Store) SaveRouting(ctx context.Context, routing Routing) error {
 				return errors.New("仍有启用中的规则监听，请先停用后再关闭规则分流")
 			}
 		}
+		if state.Routing.DefaultPolicy != routing.DefaultPolicy {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_selections WHERE name=?`, GroupFinal); err != nil {
+				return err
+			}
+		}
 		return changed(tx.ExecContext(ctx, `UPDATE routing SET enabled=?,default_policy=?,merge_sub_rules=?,sub_rule_position=?,allow_geo_rules=?,rule_set_proxy=?,dns_enabled=?,dns_domestic=?,dns_foreign=? WHERE id=1`,
 			routing.Enabled, routing.DefaultPolicy, routing.MergeSubRules, routing.SubRulePosition, routing.AllowGeoRules, routing.RuleSetProxy, routing.DNSEnabled,
 			strings.Join(routing.DNSDomestic, "\n"), strings.Join(routing.DNSForeign, "\n")))
@@ -79,6 +89,16 @@ func (s *Store) SaveRuleSet(ctx context.Context, set RuleSet) error {
 	set.URL = strings.TrimSpace(set.URL)
 	if set.Interval == 0 {
 		set.Interval = 86400
+	}
+	state, err := s.Snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(policyOptions(state), set.Policy) {
+		return errors.New("请选择存在的代理组、直连或拦截")
+	}
+	if set.Position < 0 || set.Position > 100000 {
+		return errors.New("规则排序必须在 0 到 100000 之间")
 	}
 	if err := ValidateRuleSet(set); err != nil {
 		return err

@@ -128,7 +128,7 @@ func (r *Runtime) RefreshRuleProvider(ctx context.Context, name string) error {
 }
 
 // SelectProxy points a select group at one of its members. store-selected is
-// off, so the choice lives only until the next reload.
+// off; the manager persists business choices and restores them after reload.
 func (r *Runtime) SelectProxy(ctx context.Context, group, name string) error {
 	return r.request(ctx, http.MethodPut, "/proxies/"+url.PathEscape(group), map[string]string{"name": name}, nil)
 }

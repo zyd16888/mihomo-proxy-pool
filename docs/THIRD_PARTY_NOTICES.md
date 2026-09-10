@@ -5,3 +5,6 @@
 - Go 第三方依赖及版本记录在 `go.mod` / `go.sum` 中；容器运行时由 Alpine 包管理器安装 Tini、Supervisor 等组件。
 
 该文件用于记录来源，不授予原作者未提供的许可，也不改变各第三方组件的许可证。
+
+- 代理组交互参考：https://github.com/clash-verge-rev/clash-verge-rev （proxy-groups、proxy-item、use-proxy-selection、use-record-selection）。本项目独立实现原生 JavaScript/Go 界面及持久化，没有引入该客户端代码或构建依赖。
+- 规则模板数据来源：https://github.com/MetaCubeX/meta-rules-dat 的 meta 分支，广告规则沿用 https://github.com/Loyalsoldier/clash-rules 的 release 分支。规则由用户启用后通过内核下载，规则内容与更新由上游维护。

@@ -429,6 +429,7 @@ func TestRuleSetsDownloadDirectlyByDefault(t *testing.T) {
 
 func TestDNSPairsForeignResolversWithTheProxyRuleSets(t *testing.T) {
 	s, _ := routingStore(t)
+	requireOK(t, s.Import(background, "", parsed(t, nodeJSON("proxy", "8881"))))
 	ruleListener(t, s, 17892)
 	cfg := buildFor(t, s)
 	policy, ok := cfg.DNS["nameserver-policy"].(map[string]any)

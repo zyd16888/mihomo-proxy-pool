@@ -35,6 +35,8 @@ func OpenStore(path string) (*Store, error) {
 		`CREATE TABLE IF NOT EXISTS subscription_usage(subscription_id TEXT PRIMARY KEY REFERENCES subscriptions(id) ON DELETE CASCADE,upload_bytes INTEGER,download_bytes INTEGER,total_bytes INTEGER,expire INTEGER,updated_at TEXT NOT NULL DEFAULT '',checked_at TEXT NOT NULL,status TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS nodes(id TEXT PRIMARY KEY,name TEXT NOT NULL,source_id TEXT NOT NULL,identity TEXT NOT NULL,protocol TEXT NOT NULL,server TEXT NOT NULL,port INTEGER NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,available INTEGER NOT NULL DEFAULT 1,config TEXT NOT NULL,UNIQUE(source_id,name))`,
 		listenersSchema,
+		`CREATE TABLE IF NOT EXISTS proxy_groups(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,kind TEXT NOT NULL,node_ids TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS proxy_selections(name TEXT PRIMARY KEY,member TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS rule_sets(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,policy TEXT NOT NULL,behavior TEXT NOT NULL,format TEXT NOT NULL,url TEXT NOT NULL,interval INTEGER NOT NULL,no_resolve INTEGER NOT NULL DEFAULT 0,enabled INTEGER NOT NULL DEFAULT 1,position INTEGER NOT NULL DEFAULT 500,builtin INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS routing(id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL DEFAULT 1,default_policy TEXT NOT NULL,merge_sub_rules INTEGER NOT NULL DEFAULT 1,sub_rule_position INTEGER NOT NULL DEFAULT 500,allow_geo_rules INTEGER NOT NULL DEFAULT 0,rule_set_proxy TEXT NOT NULL DEFAULT 'DIRECT',dns_enabled INTEGER NOT NULL DEFAULT 1,dns_domestic TEXT NOT NULL DEFAULT '',dns_foreign TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS subscription_profiles(subscription_id TEXT PRIMARY KEY REFERENCES subscriptions(id) ON DELETE CASCADE,groups TEXT NOT NULL,rules TEXT NOT NULL,providers TEXT NOT NULL,group_count INTEGER NOT NULL DEFAULT 0,rule_count INTEGER NOT NULL DEFAULT 0,provider_count INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL)`,
@@ -245,6 +247,9 @@ func (s *Store) Snapshot(ctx context.Context) (State, error) {
 		return state, err
 	}
 	if state.Profiles, err = s.subscriptionProfiles(ctx); err != nil {
+		return state, err
+	}
+	if state.ProxyGroups, state.Selections, err = s.proxyGroups(ctx); err != nil {
 		return state, err
 	}
 	err = s.db.QueryRowContext(ctx, `SELECT revision,applied_revision,last_error,applied_at FROM state WHERE id=1`).Scan(&state.Revision, &state.AppliedRevision, &state.LastError, &state.AppliedAt)

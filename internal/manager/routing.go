@@ -9,8 +9,7 @@ import (
 	"mihomo-proxy/internal/importer"
 )
 
-// Policy group names are fixed. They are the vocabulary the UI, the merged
-// subscription rules and the generated rules all agree on.
+// Built-in group names remain stable across database and configuration updates.
 const (
 	GroupSelect = "🚀 节点选择"
 	GroupAuto   = "♻️ 自动选择"
@@ -20,7 +19,7 @@ const (
 	GroupFinal  = "🐟 漏网之鱼"
 )
 
-// PolicyTargets are the policies a rule set or merged rule may resolve to.
+// PolicyTargets is the baseline; policyOptions adds custom and subscription groups.
 var PolicyTargets = []string{GroupProxy, GroupDirect, GroupReject, GroupSelect, GroupFinal, "DIRECT", "REJECT"}
 
 // builtinOutbounds are accepted verbatim as a rule policy without existing as
@@ -98,19 +97,10 @@ func ValidateRuleSet(r RuleSet) error {
 	if r.Interval < 60 || r.Interval > 30*24*3600 {
 		return fmt.Errorf("规则集 %s 的更新间隔必须在 60 秒到 30 天之间", r.Name)
 	}
-	if !validPolicy(r.Policy) {
-		return fmt.Errorf("规则集 %s 的策略 %q 不在可选策略中", r.Name, r.Policy)
+	if strings.TrimSpace(r.Policy) == "" || strings.ContainsAny(r.Policy, ",\r\n") {
+		return fmt.Errorf("规则集 %s 的策略名称 %q 为空或含有逗号、换行", r.Name, r.Policy)
 	}
 	return nil
-}
-
-func validPolicy(policy string) bool {
-	for _, candidate := range PolicyTargets {
-		if candidate == policy {
-			return true
-		}
-	}
-	return false
 }
 
 // ruleTypes lists the rule keywords accepted from a subscription. Anything
@@ -547,7 +537,7 @@ func BuildRouting(state State, activeNodes []string) (groups []map[string]any, r
 		seenRule:  map[string]bool{},
 	}
 
-	base := baseGroups(routing, activeNodes)
+	base := append(baseGroups(routing, activeNodes), customGroups(state, activeNodes)...)
 	for _, group := range base {
 		reg.groups[stringOf(group["name"])] = true
 	}
@@ -583,6 +573,16 @@ func BuildRouting(state State, activeNodes []string) (groups []map[string]any, r
 		}
 	}
 
+	availablePolicies := map[string]bool{"DIRECT": true, "REJECT": true}
+	for _, group := range append(append([]map[string]any{}, base...), build.groups...) {
+		availablePolicies[stringOf(group["name"])] = true
+	}
+	// Removed subscription groups must not make the entire configuration invalid.
+	for i := range sets {
+		if !availablePolicies[sets[i].Policy] {
+			sets[i].Policy = "REJECT"
+		}
+	}
 	rules = append(rules, privateRules...)
 	emitted := map[string]bool{}
 	subRulesWritten := false
@@ -623,7 +623,23 @@ func BuildRouting(state State, activeNodes []string) (groups []map[string]any, r
 	rules = append(rules, "MATCH,"+GroupFinal)
 
 	groups = append(base, build.groups...)
-	return groups, rules, build.providers, buildDNS(routing, sets), build.reports
+	// Filter an unavailable saved default (for example a removed subscription group).
+	for _, group := range groups {
+		if stringOf(group["name"]) == GroupFinal {
+			members := []any{}
+			if !availablePolicies[state.Routing.DefaultPolicy] && state.Routing.DefaultPolicy != "" {
+				members = append(members, "REJECT")
+			}
+			for _, member := range stringsOf(group["proxies"]) {
+				if availablePolicies[member] && member != GroupFinal || strings.HasPrefix(member, "node-") {
+					members = append(members, member)
+				}
+			}
+			group["proxies"] = members
+		}
+	}
+	orderSelections(groups, state.Selections)
+	return groups, rules, build.providers, buildDNSForGroups(routing, sets, groups), build.reports
 }
 
 func hasRuleListener(state State) bool {
@@ -661,7 +677,7 @@ func baseGroups(routing Routing, nodes []string) []map[string]any {
 		})
 	}
 	finalFirst := routing.DefaultPolicy
-	if finalFirst != "DIRECT" {
+	if finalFirst == "" || finalFirst == GroupFinal {
 		finalFirst = GroupSelect
 	}
 	finalMembers := []any{finalFirst}
@@ -671,10 +687,10 @@ func baseGroups(routing Routing, nodes []string) []map[string]any {
 		finalMembers = append(finalMembers, "DIRECT")
 	}
 	groups = append(groups,
-		map[string]any{"name": GroupProxy, "type": "select", "proxies": []any{GroupSelect, "DIRECT"}},
-		map[string]any{"name": GroupDirect, "type": "select", "proxies": []any{"DIRECT", GroupSelect}},
+		map[string]any{"name": GroupProxy, "type": "select", "proxies": append([]any{GroupSelect, "DIRECT"}, toAny(nodes)...)},
+		map[string]any{"name": GroupDirect, "type": "select", "proxies": append([]any{"DIRECT", GroupSelect}, toAny(nodes)...)},
 		map[string]any{"name": GroupReject, "type": "select", "proxies": []any{"REJECT", "DIRECT"}},
-		map[string]any{"name": GroupFinal, "type": "select", "proxies": finalMembers},
+		map[string]any{"name": GroupFinal, "type": "select", "proxies": uniqueMembers(append(finalMembers, append([]any{GroupProxy, GroupDirect, GroupReject, "REJECT"}, toAny(nodes)...)...))},
 	)
 	return groups
 }
@@ -683,7 +699,7 @@ func baseGroups(routing Routing, nodes []string) []map[string]any {
 // and the foreign resolvers for exactly the domain sets that route abroad.
 // rule-set keys are used instead of geosite so that kernel validation never
 // has to download the GeoSite database.
-func buildDNS(routing Routing, sets []RuleSet) map[string]any {
+func buildDNSForGroups(routing Routing, sets []RuleSet, groups []map[string]any) map[string]any {
 	if !routing.DNSEnabled {
 		return nil
 	}
@@ -703,7 +719,7 @@ func buildDNS(routing Routing, sets []RuleSet) map[string]any {
 	}
 	foreignSets := []string{}
 	for _, set := range sets {
-		if set.Enabled && set.Behavior == "domain" && set.Policy == GroupProxy {
+		if set.Enabled && set.Behavior == "domain" && foreignPolicy(set.Policy, groups, map[string]bool{}) {
 			foreignSets = append(foreignSets, set.Name)
 		}
 	}
